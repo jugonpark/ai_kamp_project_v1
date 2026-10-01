@@ -39,6 +39,7 @@ class EnvironmentSetupTests(unittest.TestCase):
         for script in (setup, normal, debug):
             self.assertIn('cd /d "%~dp0"', script)
             self.assertIn("chcp 65001", script)
+            self.assertIn('set "PYTHONIOENCODING=utf-8"', script)
         self.assertIn('"%~dp0.venv\\Scripts\\pythonw.exe" "%~dp0gui_app.py"', normal)
         self.assertIn('"%~dp0.venv\\Scripts\\python.exe" "%~dp0gui_app.py"', debug)
         self.assertIn('"%VENV_PY%" -m pip install --only-binary=:all: -r "%~dp0requirements.txt"', setup)
