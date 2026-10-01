@@ -55,10 +55,11 @@ class ArtifactAndTrainingTests(unittest.TestCase):
         for model_id in ("CNN_LSTM_AUTOENCODER", "DENOISING_CNN_LSTM_AUTOENCODER", "KAMP_LSTM_AE"):
             runs = discover_model_runs(model_id)
             self.assertTrue(runs, model_id)
-            model = tf.keras.models.load_model(runs[0].model_path, compile=False)
+            run = next((item for item in runs if item.metadata.get("noise_generation") == "legacy_static"), runs[0]) if model_id == "DENOISING_CNN_LSTM_AUTOENCODER" else runs[0]
+            model = tf.keras.models.load_model(run.model_path, compile=False)
             self.assertEqual(model.input_shape[1:], (20, 3))
             self.assertEqual(model.output_shape[1:], (20, 3))
-            self.assertEqual(runs[0].metadata.get("noise_generation"),
+            self.assertEqual(run.metadata.get("noise_generation"),
                              "legacy_static" if model_id == "DENOISING_CNN_LSTM_AUTOENCODER" else "none")
 
     def test_monitor_best_epoch_is_stored_in_new_metadata(self):

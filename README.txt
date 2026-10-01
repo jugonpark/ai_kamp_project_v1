@@ -1,6 +1,35 @@
 KAMP LSTM-AutoEncoder Baseline / Guidebook Reproduction
 =======================================================
 
+다른 Windows PC에서 시작하기
+----------------------------
+Windows 10/11 64-bit와 Python 3.12 64-bit를 권장합니다. 현재 설치 조합은
+Python 3.13 64-bit에서도 검증했습니다. TensorFlow는 CPU 실행이 기본이며
+CUDA나 GPU 설치는 필요하지 않습니다.
+
+1. GitHub repository를 clone하거나 ZIP으로 다운로드해 압축을 풉니다.
+2. Python 3.12 64-bit를 설치합니다. 설치 시 PATH 추가를 선택하면 편리합니다.
+3. 프로젝트 폴더의 `setup_environment.bat`를 더블클릭합니다. `.venv` 생성,
+   pip 및 `requirements.txt` 설치, 의존성 검증이 차례로 진행됩니다.
+4. VS Code를 쓴다면 Python Interpreter로 `.venv\Scripts\python.exe`를 선택합니다.
+5. `run_gui.bat`로 GUI를 엽니다. 오류가 나면 `run_gui_debug.bat`로 실행해
+   콘솔의 traceback을 확인합니다.
+
+프로젝트가 OneDrive, 공백 또는 한글이 포함된 경로에 있어도 배치 파일은 자신의
+위치를 기준으로 실행합니다. 시스템 Python에 직접 패키지를 설치하지 않습니다.
+환경 확인 결과는 `outputs/environment/environment_*.txt`에 저장됩니다.
+
+환경 문제 해결
+--------------
+- `ModuleNotFoundError: No module named 'PySide6'`: 시스템 Python으로 실행했거나
+  설치가 끝나지 않은 상태입니다. `setup_environment.bat`를 다시 실행하고 VS Code의
+  interpreter를 프로젝트 `.venv\Scripts\python.exe`로 선택하세요.
+- `TensorFlow GPU support is not available`: Windows CPU 환경에서는 정상일 수
+  있습니다. `verify_environment.py`가 CPU device를 확인하면 GUI를 사용할 수 있습니다.
+- GUI가 바로 종료된다면 `run_gui_debug.bat`에서 오류 내용을 확인하세요.
+- 기존 `.venv`의 Python 버전이 맞지 않으면 해당 가상환경을 별도로 백업한 뒤
+  Python 3.12/3.13 64-bit로 다시 생성하세요.
+
 Desktop GUI
 -----------
 PySide6 기반 관제 화면은 다음 명령으로 실행합니다.
@@ -10,8 +39,7 @@ PySide6 기반 관제 화면은 다음 명령으로 실행합니다.
 `run_gui.bat`를 더블클릭해도 됩니다. 프로젝트의 `.venv\Scripts\pythonw.exe`를
 사용해 콘솔 창 없이 GUI를 엽니다.
 
-    .\.venv\Scripts\Activate.ps1
-    python gui_app.py
+    .\.venv\Scripts\python.exe gui_app.py
 
 GUI는 시작 시 학습하지 않습니다. `Run Mode`에서 `QUICK_TEST` 또는
 `FULL_TRAINING`을 고르고 `START TRAINING`을 눌러야 worker thread에서 학습이
@@ -41,7 +69,7 @@ Random Seed를 수정하고 CALLBACK SETTINGS와 DENOISING SETTINGS를 확인합
 학습하지 않습니다. 기본 선택은 기존 KAMP 기준인 `LAST_STEP_MSE`와
 `PR_INTERSECTION`입니다.
 
-    python gui_app.py
+    .\.venv\Scripts\python.exe gui_app.py
 
 실행 후 `EVALUATION` -> `LOAD MODEL`을 누르면 저장된 모델과 기존 KAMP 데이터
 분할로 Validation/Test prediction을 각각 한 번 생성해 메모리에 보관합니다. 이후
