@@ -24,10 +24,11 @@ def discover_model_runs(model_id):
             if not model_path.is_file(): continue
             meta_path = folder / "metadata.json"
             metadata = json.loads(meta_path.read_text(encoding="utf-8")) if meta_path.is_file() else {}
+            metadata.setdefault("noise_generation", "legacy_static" if spec.denoising else "none")
             runs.append(ModelRun(model_id, folder.name, model_path, metadata))
     if model_id == "KAMP_LSTM_AE":
         legacy = core.MODEL_DIR / "kamp_lstm_autoencoder.keras"
-        if legacy.is_file(): runs.append(ModelRun(model_id, "LEGACY_KAMP", legacy, {"model_id":model_id,"task_type":spec.task_type,"forecast_length":0,"legacy":True}))
+        if legacy.is_file(): runs.append(ModelRun(model_id, "LEGACY_KAMP", legacy, {"model_id":model_id,"task_type":spec.task_type,"forecast_length":0,"legacy":True,"noise_generation":"none"}))
     return runs
 
 def save_model_run(model, history, spec, training_info):
@@ -37,7 +38,12 @@ def save_model_run(model, history, spec, training_info):
     frame = pd.DataFrame(history.history); frame.index = frame.index + 1; frame.index.name = "epoch"
     frame.to_csv(run_dir / "training_history.csv")
     plot_utils.save_training_loss(frame.get("loss", []), frame.get("val_loss", []), run_dir / "training_loss.png", frame.get("learning_rate", frame.get("lr")))
-    val = list(frame.get("val_loss", [])); best = int(min(range(len(val)), key=val.__getitem__) + 1) if val else 0
+    val = list(frame.get("val_loss", [])); best = int(training_info.get("monitor_best_epoch") or 0)
+    if not best and val:
+        best = int(min(range(len(val)), key=val.__getitem__) + 1)
+    best_loss = training_info.get("monitor_best_val_loss")
+    if best_loss is None:
+        best_loss = float(val[best-1]) if best else None
     metadata = {"model_id":spec.id,"model_status":spec.status,"display_name":spec.display_name,"task_type":spec.task_type,
         "created_at":created.isoformat(),"python_version":platform.python_version(),"tensorflow_version":tf.__version__,
         "sequence_length":core.SEQUENCE_LENGTH,"prediction_horizon":core.PREDICTION_HORIZON,
@@ -46,7 +52,8 @@ def save_model_run(model, history, spec, training_info):
         "optimizer":training_info.get("optimizer", "Adam"),"learning_rate":training_info.get("learning_rate", 0.001),"batch_size":training_info.get("batch_size", core.BATCH_SIZE),
         "weight_decay":training_info.get("weight_decay", 0.0001), "huber_delta":training_info.get("huber_delta", 1.0),
         "requested_epochs":training_info["requested_epochs"],"completed_epochs":len(frame),
-        "best_epoch":best,"best_val_loss":float(val[best-1]) if best else None,
+        "completion_status":training_info.get("completion_status", "UNKNOWN"),
+        "best_epoch":best,"best_val_loss":float(best_loss) if best_loss is not None else None,
         "parameter_count":model.count_params(),"model_file":"model.keras",
         "dataset":{"normal_rows":training_info.get("normal_rows"),"anomaly_rows":training_info.get("anomaly_rows"),
                    "train_sequences":training_info.get("train_sequences"),"valid_samples":training_info.get("valid_samples"),
@@ -54,7 +61,8 @@ def save_model_run(model, history, spec, training_info):
         "experiment_name":training_info.get("experiment_name") or f"{spec.id}_{run_dir.name}", "random_seed":training_info.get("random_seed", 42),
         "denoising_enabled":spec.denoising, "noise_type":training_info.get("noise_type", "Gaussian"),
         "noise_mean":training_info.get("noise_mean", 0.0), "noise_std":training_info.get("noise_std", 0.01 if spec.denoising else 0.0),
-        "noise_clip":training_info.get("noise_clip", True), "loss":training_info.get("loss", "MSE"),
+        "noise_clip":training_info.get("noise_clip", True),
+        "noise_generation":"dynamic_per_batch" if spec.denoising else "none", "loss":training_info.get("loss", "MSE"),
         "callbacks":{"reduce_lr":{"enabled":training_info.get("reduce_lr_enabled", True),"factor":training_info.get("reduce_lr_factor", .7),
                      "patience":training_info.get("reduce_lr_patience", 50),"min_lr":training_info.get("min_lr", 0.0)},
                      "early_stopping":{"enabled":training_info.get("early_stopping_enabled", True),
@@ -66,7 +74,7 @@ def save_model_run(model, history, spec, training_info):
     summary = {key: metadata[key] for key in ("model_id", "model_status", "experiment_name", "created_at", "random_seed",
                "optimizer", "learning_rate", "loss", "batch_size", "requested_epochs", "completed_epochs",
                "best_epoch", "best_val_loss", "training_duration_seconds", "callbacks")}
-    summary["denoising"] = {key: metadata[key] for key in ("denoising_enabled", "noise_type", "noise_mean", "noise_std", "noise_clip")}
+    summary["denoising"] = {key: metadata[key] for key in ("denoising_enabled", "noise_type", "noise_mean", "noise_std", "noise_clip", "noise_generation")}
     (run_dir / "experiment_summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
     return ModelRun(spec.id, run_dir.name, model_path, metadata)
 

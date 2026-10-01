@@ -257,5 +257,30 @@ class EvaluationGuiTests(unittest.TestCase):
         self.assertIn("추천 실험값", window.parameter_guide.text())
         window.close()
 
+    def test_weak_denoising_preset_reaches_training_config(self):
+        from gui_app import MainWindow
+        from model_data import prepare_fit_data
+        import numpy as np
+        window = MainWindow(); window.show(); self.app.processEvents()
+        window.preset_combo.setCurrentIndex(window.preset_combo.findData("DENOISING WEAK 0.005"))
+        config = window._training_config_dict()
+        self.assertEqual(config["model_id"], "DENOISING_CNN_LSTM_AUTOENCODER")
+        self.assertEqual(config["preset"], "DENOISING WEAK 0.005")
+        self.assertEqual(config["noise_mean"], 0.0)
+        self.assertEqual(config["noise_std"], .005)
+        self.assertTrue(config["noise_clip"])
+        self.assertEqual((config["epochs"], config["batch_size"], config["learning_rate"]), (800, 128, .001))
+        self.assertIn("매번 새로운 Gaussian 노이즈", window.training_model_description.text())
+        window.show_parameter_guide("Noise Std")
+        self.assertIn("0.005", window.parameter_guide.text())
+        clean = np.full((2, 20, 3), .5, dtype=np.float32)
+        dataset, _, _, _ = prepare_fit_data(clean, clean, clean, clean, denoising=True,
+            mean=config["noise_mean"], std=config["noise_std"], clip=config["noise_clip"],
+            seed=config["random_seed"], batch_size=config["batch_size"])
+        noisy = next(iter(dataset))[0].numpy()
+        self.assertGreater(float(np.std(noisy - clean)), .003)
+        self.assertLess(float(np.std(noisy - clean)), .007)
+        window.close()
+
 
 if __name__ == "__main__": unittest.main()

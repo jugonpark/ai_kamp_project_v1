@@ -42,8 +42,39 @@ class ArtifactAndTrainingTests(unittest.TestCase):
             self.assertEqual(metadata["callbacks"]["early_stopping"]["patience"], 5)
             self.assertEqual(metadata["callbacks"]["reduce_lr"]["factor"], .6)
             self.assertEqual(metadata["training_duration_seconds"], 1.25)
+            self.assertEqual(metadata["noise_generation"], "dynamic_per_batch")
+            self.assertEqual(metadata["noise_std"], .01)
             path = model_artifacts.append_evaluation_result(run, {"f1":.9})
             self.assertTrue(path.is_file())
+        finally:
+            shutil.rmtree(folder, ignore_errors=True)
+
+    def test_existing_saved_models_load_without_training_or_evaluation(self):
+        import tensorflow as tf
+        from model_artifacts import discover_model_runs
+        for model_id in ("CNN_LSTM_AUTOENCODER", "DENOISING_CNN_LSTM_AUTOENCODER", "KAMP_LSTM_AE"):
+            runs = discover_model_runs(model_id)
+            self.assertTrue(runs, model_id)
+            model = tf.keras.models.load_model(runs[0].model_path, compile=False)
+            self.assertEqual(model.input_shape[1:], (20, 3))
+            self.assertEqual(model.output_shape[1:], (20, 3))
+            self.assertEqual(runs[0].metadata.get("noise_generation"),
+                             "legacy_static" if model_id == "DENOISING_CNN_LSTM_AUTOENCODER" else "none")
+
+    def test_monitor_best_epoch_is_stored_in_new_metadata(self):
+        import model_artifacts
+        from model_registry import MODEL_REGISTRY
+        class DummyModel:
+            def save(self, path): Path(path).write_bytes(b"model")
+            def count_params(self): return 123
+        history = SimpleNamespace(history={"loss":[.2,.1], "val_loss":[.3,.295]})
+        folder = Path.cwd() / "outputs" / ".test_artifacts" / uuid.uuid4().hex
+        try:
+            with patch.object(model_artifacts, "RUNS_ROOT", folder):
+                run = model_artifacts.save_model_run(DummyModel(), history, MODEL_REGISTRY["DENOISING_CNN_LSTM_AUTOENCODER"],
+                    {"requested_epochs":2, "monitor_best_epoch":1, "monitor_best_val_loss":.3})
+            self.assertEqual(run.metadata["best_epoch"], 1)
+            self.assertEqual(run.metadata["best_val_loss"], .3)
         finally:
             shutil.rmtree(folder, ignore_errors=True)
 

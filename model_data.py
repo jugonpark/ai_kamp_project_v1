@@ -1,6 +1,7 @@
 """Task adapters that align reconstruction and forecast samples."""
 from dataclasses import dataclass
 import numpy as np
+import tensorflow as tf
 import train_lstm_ae as core
 
 @dataclass
@@ -9,6 +10,7 @@ class TaskBundle:
     task_type: str; error_name: str
 
 def add_training_noise(inputs, mean=0.0, std=0.01, clip=True, seed=42):
+    """Legacy one-shot helper; the training worker uses prepare_fit_data instead."""
     if std < 0: raise ValueError("Noise std must be non-negative")
     rng = np.random.default_rng(seed)
     noisy = np.asarray(inputs, dtype=np.float32).copy()
@@ -16,10 +18,28 @@ def add_training_noise(inputs, mean=0.0, std=0.01, clip=True, seed=42):
     return np.clip(noisy, 0.0, 1.0) if clip else noisy
 
 def prepare_fit_data(train_inputs, train_targets, validation_inputs, validation_targets,
-                     denoising=False, mean=0.0, std=0.01, clip=True, seed=42):
-    """Return fit arrays without ever mutating clean train/validation arrays."""
-    fit_inputs = add_training_noise(train_inputs, mean, std, clip, seed) if denoising else np.asarray(train_inputs).copy()
-    return fit_inputs, np.asarray(train_targets).copy(), np.asarray(validation_inputs).copy(), np.asarray(validation_targets).copy()
+                     denoising=False, mean=0.0, std=0.01, clip=True, seed=42, batch_size=128):
+    """Keep baseline arrays unchanged; denoising returns a sequential dynamic dataset."""
+    clean_inputs = np.asarray(train_inputs, dtype=np.float32).copy()
+    clean_targets = np.asarray(train_targets, dtype=np.float32).copy()
+    valid_inputs = np.asarray(validation_inputs).copy()
+    valid_targets = np.asarray(validation_targets).copy()
+    if not denoising:
+        return clean_inputs, clean_targets, valid_inputs, valid_targets
+    if std < 0:
+        raise ValueError("Noise std must be non-negative")
+    generator = tf.random.Generator.from_seed(int(seed))
+    def noisy_batch(inputs, targets):
+        if std == 0:
+            return inputs, targets
+        noise = generator.normal(tf.shape(inputs), mean=float(mean), stddev=float(std), dtype=inputs.dtype)
+        noisy = inputs + noise
+        if clip:
+            noisy = tf.clip_by_value(noisy, 0.0, 1.0)
+        return noisy, targets
+    dataset = tf.data.Dataset.from_tensor_slices((clean_inputs, clean_targets)).batch(int(batch_size))
+    dataset = dataset.map(noisy_batch, num_parallel_calls=1, deterministic=True)
+    return dataset, None, valid_inputs, valid_targets
 
 def create_task_bundle(data, model_spec):
     values = data[core.FEATURES].to_numpy(dtype=np.float32)

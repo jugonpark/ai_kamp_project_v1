@@ -28,6 +28,13 @@ Random Seed를 수정하고 CALLBACK SETTINGS와 DENOISING SETTINGS를 확인합
 변경합니다. 마우스 휠은 값을 바꾸지 않고 설정 영역을 스크롤합니다. 각 항목의
 `ⓘ` 버튼을 누르면 현재 값, 의미와 권장 범위가 표시됩니다.
 
+`학습 그래프` 탭에서는 현재 학습과 저장된 실행의 `training_history.csv`를 큰
+화면으로 볼 수 있습니다. 손실·학습률·일반화 차이·손실과 학습률의 분리 보기,
+두 실행의 손실 비교를 지원합니다. Matplotlib 도구 모음으로 확대·이동·초기화할
+수 있으며 `그래프 PNG 저장`은 `outputs/graphs/`에 새 파일을 생성합니다.
+실시간 학습의 `학습 그래프 크게 보기`와 평가 및 비교의 `학습 곡선 보기`로
+해당 탭에 이동할 수 있습니다. 그래프 조회는 학습이나 평가를 시작하지 않습니다.
+
 저장 모델 평가와 알고리즘 비교
 -----------------------------
 `EVALUATION` 탭은 기존 Training과 분리되어 있으며 평가 동작에서 모델을 다시
@@ -77,10 +84,16 @@ TensorFlow seed와 deterministic op 설정을 적용하지만 플랫폼에 따�
 재현성까지 보장하지는 않습니다.
 
 첫 Denoising 비교는 CNN-LSTM baseline과 seed, optimizer, learning rate, batch,
-loss, callback을 같게 두고 Gaussian noise std 0.01만 다르게 사용합니다. 평가는
+ loss, callback을 같게 두고 Gaussian noise std 0.005부터 비교합니다. 평가는
 MAHALANOBIS_ERROR + POT_1PCT를 우선 사용하되, threshold 숫자는 각 모델의
 validation score로 따로 보정합니다. Test metric을 반복적으로 hyperparameter 선택에
 사용하면 test set에 간접 과적합될 수 있으므로 최종 확인 용도로만 사용합니다.
+
+새 Denoising 학습은 `tf.data`에서 각 배치를 소비할 때마다 Gaussian 노이즈를 다시
+생성합니다. 입력은 noisy, target은 clean이며 검증 및 테스트 데이터에는 노이즈를
+추가하지 않습니다. `DENOISING WEAK 0.005` 프리셋은 첫 약한 노이즈 비교용입니다.
+기존 저장 모델의 메타데이터에 `noise_generation`이 없으면 로드 시
+`legacy_static`으로 해석하고, 새 실행은 `dynamic_per_batch`로 기록합니다.
 
 Reconstruction 모델은 입력 20×3을 복원하고 Forecast 모델은 같은 입력에서 바로 다음
 5×3 센서값을 예측합니다. 두 task의 label은 기존과 동일한 input 시작점 기준

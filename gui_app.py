@@ -7,7 +7,8 @@ import json
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QThread, Qt, QEvent
+from PySide6.QtCore import QThread, Qt, QEvent, Slot
+from PySide6.QtGui import QFont, QFontDatabase
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QFormLayout, QGridLayout,
     QGroupBox, QHBoxLayout, QLabel, QMainWindow, QMessageBox, QPushButton,
     QPlainTextEdit, QProgressBar, QTabWidget, QTableWidget, QTableWidgetItem,
@@ -23,6 +24,7 @@ from evaluation_controller import EvaluationController
 from evaluation_worker import EvaluationWorker
 from model_registry import MODEL_REGISTRY
 from model_artifacts import discover_model_runs, append_evaluation_result
+from training_graph import TrainingGraphTab
 from gui_help import PARAMETER_HELP, format_parameter_help
 from training_config import load_training_config as load_config_file, save_training_config as save_config_file, validate_training_config
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
@@ -68,8 +70,18 @@ class LossCanvas(FigureCanvas):
 
 
 class MainWindow(QMainWindow):
+    _korean_font_family = None
+
     def __init__(self):
         super().__init__()
+        korean_font_path = Path(r"C:\Windows\Fonts\malgun.ttf")
+        if self._korean_font_family is None and korean_font_path.is_file():
+            font_id = QFontDatabase.addApplicationFont(str(korean_font_path))
+            families = QFontDatabase.applicationFontFamilies(font_id) if font_id >= 0 else []
+            if families:
+                MainWindow._korean_font_family = families[0]
+        if self._korean_font_family:
+            self.setFont(QFont(self._korean_font_family, 10))
         self.setWindowTitle("KAMP 예지보전 AI 학습 시스템")
         self.resize(1280, 820)
         self.thread = None
@@ -89,7 +101,7 @@ class MainWindow(QMainWindow):
         header.setObjectName("header"); outer.addWidget(header)
         self.status_label = QLabel("선택한 모델: CNN_LSTM_AUTOENCODER    상태: 준비")
         outer.addWidget(self.status_label)
-        tabs = QTabWidget(); live = QWidget(); live_layout = QHBoxLayout(live)
+        tabs = QTabWidget(); self.tabs = tabs; live = QWidget(); live_layout = QHBoxLayout(live)
         self.live_splitter = QSplitter(Qt.Horizontal)
         left_container = QWidget(); left_layout = QVBoxLayout(left_container)
         left_container.setMinimumWidth(420)
@@ -137,7 +149,7 @@ class MainWindow(QMainWindow):
         preset_box = QGroupBox("실험 프리셋"); preset_form = QFormLayout(preset_box)
         self.preset_combo = QComboBox()
         for display, preset_id in (("CNN-LSTM 기준", "CNN-LSTM BASELINE"), ("CNN-LSTM 보수적", "CNN-LSTM CONSERVATIVE"),
-                                   ("Denoising 기본", "DENOISING DEFAULT"), ("사용자 설정", "CUSTOM")):
+                                   ("Denoising 기본", "DENOISING DEFAULT"), ("Denoising 약하게 0.005", "DENOISING WEAK 0.005"), ("사용자 설정", "CUSTOM")):
             self.preset_combo.addItem(display, preset_id)
         self.preset_combo.currentIndexChanged.connect(lambda: self.apply_preset(self.preset_combo.currentData()))
         self.experiment_name_edit = QLineEdit(); self.experiment_name_edit.setPlaceholderText("비워두면 자동 생성")
@@ -228,11 +240,15 @@ class MainWindow(QMainWindow):
         left_layout.addLayout(controls)
         utility_controls = QHBoxLayout()
         self.reset_graph_button = QPushButton("그래프 초기화"); self.reset_graph_button.clicked.connect(self.reset_loss_graph); utility_controls.addWidget(self.reset_graph_button)
+        self.open_graph_button = QPushButton("학습 그래프 크게 보기"); self.open_graph_button.clicked.connect(self.show_current_graph); utility_controls.addWidget(self.open_graph_button)
         self.open_button = QPushButton("결과 폴더 열기"); self.open_button.clicked.connect(self.open_outputs); utility_controls.addWidget(self.open_button)
         left_layout.addLayout(utility_controls)
         self.live_splitter.addWidget(left_container); self.live_splitter.addWidget(right_container)
         self.live_splitter.setSizes([480, 800]); live_layout.addWidget(self.live_splitter)
         tabs.addTab(live, "실시간 학습")
+        self.graph_tab = TrainingGraphTab()
+        tabs.addTab(self.graph_tab, "학습 그래프")
+        tabs.currentChanged.connect(lambda index: self.graph_tab.render() if tabs.widget(index) is self.graph_tab else None)
         data_tab = QWidget(); data_layout = QFormLayout(data_tab); self.dataset_text = QLabel("실행 기록 없음"); self.dataset_text.setWordWrap(True); data_layout.addRow("데이터셋", self.dataset_text); tabs.addTab(data_tab, "데이터")
         eval_tab = QWidget(); eval_layout = QVBoxLayout(eval_tab)
         selectors = QGroupBox("평가 설정"); selector_form = QFormLayout(selectors)
@@ -260,7 +276,8 @@ class MainWindow(QMainWindow):
         self.import_history_button = QPushButton("과거 결과 불러오기"); self.import_history_button.clicked.connect(self.import_historical_result)
         self.set_baseline_button = QPushButton("기준 실험으로 지정"); self.set_baseline_button.clicked.connect(self.set_current_as_baseline)
         self.set_champion_button = QPushButton("최고 실험으로 지정"); self.set_champion_button.clicked.connect(self.set_current_as_champion)
-        for button in (self.load_model_button, self.run_evaluation_button, self.compare_all_button, self.compare_models_button, self.clear_comparison_button, self.export_comparison_button, self.import_history_button, self.set_baseline_button, self.set_champion_button): eval_actions.addWidget(button)
+        self.show_history_graph_button = QPushButton("학습 곡선 보기"); self.show_history_graph_button.clicked.connect(self.show_evaluation_graph)
+        for button in (self.load_model_button, self.run_evaluation_button, self.compare_all_button, self.compare_models_button, self.clear_comparison_button, self.export_comparison_button, self.import_history_button, self.set_baseline_button, self.set_champion_button, self.show_history_graph_button): eval_actions.addWidget(button)
         eval_layout.addLayout(eval_actions)
         description_box = QGroupBox("평가 방식 설명"); description_layout = QVBoxLayout(description_box)
         self.algorithm_description = QLabel(); self.algorithm_description.setWordWrap(True); description_layout.addWidget(self.algorithm_description); eval_layout.addWidget(description_box)
@@ -330,7 +347,27 @@ class MainWindow(QMainWindow):
 
     def reset_loss_graph(self):
         self.loss_canvas.clear_data()
+        self.graph_tab.reset_current()
         self._log("Training loss graph reset")
+
+    def show_current_graph(self):
+        self.graph_tab.show_current()
+        self.tabs.setCurrentWidget(self.graph_tab)
+
+    def show_evaluation_graph(self):
+        run = self.evaluation_run_combo.currentData()
+        if self.comparison_history:
+            result = self._selected_history_result()
+            model_id = result.get("model_id")
+            experiment = result.get("experiment_name")
+            if model_id in MODEL_REGISTRY:
+                run = next((candidate for candidate in discover_model_runs(model_id)
+                            if candidate.metadata.get("experiment_name") == experiment), run)
+        if run is not None:
+            self.graph_tab.open_saved_run(run)
+        else:
+            self.graph_tab.show_saved()
+        self.tabs.setCurrentWidget(self.graph_tab)
 
     def update_training_model(self):
         spec = MODEL_REGISTRY[self.training_model_combo.currentData()]
@@ -423,13 +460,13 @@ class MainWindow(QMainWindow):
         if preset == "CUSTOM": return
         if not hasattr(self, "epochs_spin"): return
         self._applying_preset = True
-        model_id = "DENOISING_CNN_LSTM_AUTOENCODER" if preset == "DENOISING DEFAULT" else "CNN_LSTM_AUTOENCODER"
+        model_id = "DENOISING_CNN_LSTM_AUTOENCODER" if preset in ("DENOISING DEFAULT", "DENOISING WEAK 0.005") else "CNN_LSTM_AUTOENCODER"
         self.training_model_combo.setCurrentIndex(self.training_model_combo.findData(model_id))
         self.epochs_spin.setValue(800); self.batch_spin.setValue(128); self.optimizer_combo.setCurrentText("Adam"); self.weight_decay_spin.setValue(.0001); self.loss_combo.setCurrentText("MSE"); self.huber_delta_spin.setValue(1.0); self.seed_spin.setValue(42)
         self.reduce_lr_enabled.setChecked(True); self.reduce_lr_factor_spin.setValue(.7); self.reduce_lr_patience_spin.setValue(50); self.min_lr_spin.setValue(0)
         self.early_stopping_enabled.setChecked(True); self.early_stopping_patience_spin.setValue(120); self.early_stopping_min_delta_spin.setValue(.00001); self.restore_best_weights.setChecked(True)
         self.learning_rate_spin.setValue(.0005 if preset == "CNN-LSTM CONSERVATIVE" else .001)
-        self.noise_type_combo.setCurrentText("Gaussian"); self.noise_mean_spin.setValue(0); self.noise_std_spin.setValue(.01 if preset == "DENOISING DEFAULT" else 0.0); self.noise_clip_check.setChecked(True)
+        self.noise_type_combo.setCurrentText("Gaussian"); self.noise_mean_spin.setValue(0); self.noise_std_spin.setValue(.005 if preset == "DENOISING WEAK 0.005" else .01 if preset == "DENOISING DEFAULT" else 0.0); self.noise_clip_check.setChecked(True)
         self._applying_preset = False
         self._update_experiment_summary()
 
@@ -684,6 +721,7 @@ class MainWindow(QMainWindow):
         except ValueError as exc:
             QMessageBox.warning(self, "Invalid Training Configuration", str(exc)); return
         self.reset_loss_graph()
+        self.graph_tab.reset_current({**config, "display_name": self.training_model_combo.currentText()})
         self._set_training_locked(True)
         self.status_label.setText(f"학습 모델: {self.training_model_combo.currentText()}    실행: {'빠른 시험' if quick else '전체 학습'}    상태: 시작 중")
         model_id = self.training_model_combo.currentData()
@@ -700,14 +738,19 @@ class MainWindow(QMainWindow):
     def update_status(self, status): self.status_label.setText(self.status_label.text().split("상태:")[0] + "상태: " + status)
     def update_dataset(self, data): self.dataset_text.setText("\n".join(f"{k}: {v}" for k, v in data.items())); self._log(f"Dataset ready: {data}")
     def update_model(self, params, trainable): self.params_label.setText(f"전체 파라미터 수: {params}\n학습 파라미터 수: {trainable}")
+    @Slot(int, int, float, float, float, float, int, int, float, int)
     def update_epoch(self, epoch, maximum, loss, val_loss, lr, elapsed, since, best_epoch, best_loss, reduce_count):
         previous_lr = getattr(self, "_last_lr", lr); self._last_lr = lr
         self.progress.setMaximum(maximum); self.progress.setValue(epoch); self.loss_canvas.update_data(epoch, loss, val_loss); self.loss_canvas.update_markers(best_epoch, lr < previous_lr)
         values = (("Model", self.training_model_combo.currentData()), ("Experiment Name", self.experiment_name_edit.text().strip() or "AUTO"), ("Epoch", f"{epoch} / {maximum}"), ("Train Loss", f"{loss:.6g}"), ("Validation Loss", f"{val_loss:.6g}"), ("Best Epoch", str(best_epoch)), ("Best Val Loss", f"{best_loss:.6g}"), ("Generalization Gap", f"{val_loss-loss:+.6g}"), ("Learning Rate", f"{lr:.6g}"), ("Elapsed", f"{elapsed:.1f}s"), ("EarlyStopping", f"{since} / {self.early_stopping_patience_spin.value()}"), ("ReduceLR", str(reduce_count)), ("Optimizer", self.optimizer_combo.currentText()), ("Loss", self.loss_combo.currentText()), ("Batch Size", str(self.batch_spin.value())), ("Noise Std", str(self.noise_std_spin.value()) if self.training_model_combo.currentData() == "DENOISING_CNN_LSTM_AUTOENCODER" else "N/A"))
         for key, value in values: self.monitor_labels[key].setText(value)
+        self.graph_tab.add_current_epoch(epoch, loss, val_loss, lr, best_epoch, best_loss)
     def update_evaluation(self, data):
         self._log(f"Training baseline evaluation: threshold={data.get('threshold')} accuracy={data.get('accuracy')} f1={data.get('f1_score')}")
-    def training_finished(self, status): self.update_status(status); self._set_training_locked(False); self.refresh_evaluation_runs(); self._finish_thread()
+    def training_finished(self, status):
+        self.graph_tab.finish_current(status, core.QUICK_TEST_EPOCHS if self.run_mode.currentData() == "QUICK_TEST" else self.epochs_spin.value())
+        self.graph_tab.refresh_runs()
+        self.update_status(status); self._set_training_locked(False); self.refresh_evaluation_runs(); self._finish_thread()
     def training_failed(self, message): QMessageBox.critical(self, "Training Error", message); self.update_status("ERROR"); self._log(message); self._set_training_locked(False); self._finish_thread()
     def _finish_thread(self):
         # Worker completion is emitted before QObject.run returns. Waiting here deadlocks.

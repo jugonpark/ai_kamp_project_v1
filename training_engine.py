@@ -32,10 +32,11 @@ class GUITrainingCallback(QObject, tf.keras.callbacks.Callback):
     epoch_finished = Signal(int, int, float, float, float, float, int, int, float, int)
     event = Signal(str)
 
-    def __init__(self, max_epochs):
+    def __init__(self, max_epochs, min_delta=0.00001):
         QObject.__init__(self)
         tf.keras.callbacks.Callback.__init__(self)
         self.max_epochs = max_epochs
+        self.min_delta = float(min_delta)
         self.stop_requested = False
         self.started_at = None
         self.best_loss = float("inf")
@@ -59,7 +60,7 @@ class GUITrainingCallback(QObject, tf.keras.callbacks.Callback):
         val_loss = float(logs.get("val_loss", float("nan")))
         lr = float(tf.keras.backend.get_value(self.model.optimizer.learning_rate))
         elapsed = time.monotonic() - self.started_at if self.started_at else 0.0
-        if val_loss < self.best_loss - 1e-5:
+        if val_loss < self.best_loss - self.min_delta:
             self.best_loss = val_loss
             self.best_epoch = epoch + 1
             self.since_improvement = 0
@@ -148,7 +149,7 @@ class TrainingWorker(QObject):
             trainable_params = sum(int(np.prod(weight.shape)) for weight in model.trainable_weights)
             self.model_ready.emit(model.count_params(), trainable_params)
             max_epochs = core.QUICK_TEST_EPOCHS if self.quick_test else int(self.config["epochs"])
-            self.callback = GUITrainingCallback(max_epochs)
+            self.callback = GUITrainingCallback(max_epochs, self.config["early_stopping_min_delta"])
             self.callback.epoch_finished.connect(self.epoch_update.emit)
             self.callback.event.connect(self.log_message.emit)
             callbacks = []
@@ -164,11 +165,15 @@ class TrainingWorker(QObject):
             clean_valid_inputs, clean_valid_targets = x_valid[y_valid == 0], target_valid[y_valid == 0]
             fit_inputs, fit_targets, valid_inputs, valid_targets = prepare_fit_data(
                 x_train, target_train, clean_valid_inputs, clean_valid_targets, spec.denoising,
-                self.config["noise_mean"], self.config["noise_std"], self.config["noise_clip"], self.config["random_seed"])
+                self.config["noise_mean"], self.config["noise_std"], self.config["noise_clip"], self.config["random_seed"],
+                self.config["batch_size"])
             training_started = time.monotonic()
-            history = model.fit(fit_inputs, fit_targets, validation_data=(valid_inputs, valid_targets),
-                                epochs=max_epochs, batch_size=int(self.config["batch_size"]), shuffle=False,
-                                callbacks=callbacks, verbose=0)
+            fit_kwargs = {"validation_data": (valid_inputs, valid_targets), "epochs": max_epochs,
+                          "shuffle": False, "callbacks": callbacks, "verbose": 0}
+            if spec.denoising:
+                history = model.fit(fit_inputs, **fit_kwargs)
+            else:
+                history = model.fit(fit_inputs, fit_targets, batch_size=int(self.config["batch_size"]), **fit_kwargs)
             self.status_changed.emit("EVALUATING")
             valid_prediction = model.predict(x_valid, verbose=0); valid_error = np.square(target_valid - valid_prediction)[:, -1, :].mean(axis=1)
             threshold, val_precision, val_recall, _, _, _ = core.calculate_pr_intersection_threshold(y_valid, valid_error)
@@ -180,6 +185,8 @@ class TrainingWorker(QObject):
                        "f1_score": float(core.f1_score(y_test, y_pred, zero_division=0)),
                        "confusion_matrix": core.confusion_matrix(y_test, y_pred).tolist()}
             run = save_model_run(model, history, spec, {**self.config, "requested_epochs":max_epochs,
+                "completion_status": "STOPPED" if self.callback.stop_requested else "EARLY_STOPPED" if len(history.history.get("loss", [])) < max_epochs else "COMPLETED",
+                "monitor_best_epoch": self.callback.best_epoch, "monitor_best_val_loss": self.callback.best_loss,
                 "training_duration_seconds": time.monotonic() - training_started,
                 "normal_rows":len(normal), "anomaly_rows":len(anomaly), "train_sequences":len(x_train),
                 "valid_samples":len(x_valid), "test_samples":len(x_test)})

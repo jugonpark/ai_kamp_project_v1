@@ -25,11 +25,54 @@ class CnnExperimentTests(unittest.TestCase):
         validation = np.full((1, 20, 3), .25, dtype=np.float32); validation_target = validation.copy()
         original = train.copy()
         fit_x, fit_y, valid_x, valid_y = prepare_fit_data(train, target, validation, validation_target,
-                                                          denoising=True, std=.01, seed=42)
+                                                          denoising=True, std=.01, seed=42, batch_size=2)
+        noisy, clean_target = next(iter(fit_x))
         self.assertTrue(np.array_equal(train, original))
-        self.assertFalse(np.array_equal(fit_x, train))
-        self.assertTrue(np.array_equal(fit_y, target))
+        self.assertIsNone(fit_y)
+        self.assertFalse(np.array_equal(noisy.numpy(), train))
+        self.assertTrue(np.array_equal(clean_target.numpy(), target))
         self.assertTrue(np.array_equal(valid_x, validation))
         self.assertTrue(np.array_equal(valid_y, validation_target))
+
+    def test_dynamic_noise_changes_between_passes_and_repeats_with_seed(self):
+        from model_data import prepare_fit_data
+        clean = np.full((2, 20, 3), .5, dtype=np.float32)
+        def make_dataset():
+            return prepare_fit_data(clean, clean, clean, clean, denoising=True, std=.01, seed=123, batch_size=2)[0]
+        dataset = make_dataset()
+        first = next(iter(dataset))[0].numpy()
+        second = next(iter(dataset))[0].numpy()
+        self.assertFalse(np.array_equal(first, second))
+        self.assertTrue(np.array_equal(first, next(iter(make_dataset()))[0].numpy()))
+
+    def test_zero_std_and_clip_and_gui_noise_settings(self):
+        from model_data import prepare_fit_data
+        clean = np.full((2, 20, 3), .5, dtype=np.float32)
+        zero = prepare_fit_data(clean, clean, clean, clean, denoising=True, mean=.1, std=0, seed=7, batch_size=2)[0]
+        self.assertTrue(np.array_equal(next(iter(zero))[0].numpy(), clean))
+        clipped = prepare_fit_data(clean, clean, clean, clean, denoising=True, mean=.8, std=.1, clip=True, seed=7, batch_size=2)[0]
+        self.assertLessEqual(float(next(iter(clipped))[0].numpy().max()), 1.0)
+        unclipped = prepare_fit_data(clean, clean, clean, clean, denoising=True, mean=.8, std=.1, clip=False, seed=7, batch_size=2)[0]
+        self.assertGreater(float(next(iter(unclipped))[0].numpy().min()), 1.0)
+
+    def test_baseline_stays_array_based(self):
+        from model_data import prepare_fit_data
+        clean = np.full((2, 20, 3), .5, dtype=np.float32)
+        fit_x, fit_y, valid_x, valid_y = prepare_fit_data(clean, clean, clean, clean)
+        self.assertIsInstance(fit_x, np.ndarray)
+        self.assertTrue(np.array_equal(fit_x, fit_y))
+        self.assertTrue(np.array_equal(valid_x, valid_y))
+
+    def test_evaluation_task_bundle_keeps_clean_features(self):
+        import pandas as pd
+        import train_lstm_ae as core
+        from model_data import create_task_bundle
+        from model_registry import MODEL_REGISTRY
+        values = np.linspace(.1, .9, 150, dtype=np.float32)
+        data = pd.DataFrame({name: values for name in core.FEATURES})
+        data[core.LABEL_COLUMN] = 0
+        bundle = create_task_bundle(data, MODEL_REGISTRY["DENOISING_CNN_LSTM_AUTOENCODER"])
+        self.assertTrue(np.array_equal(bundle.inputs[0], data[core.FEATURES].to_numpy(dtype=np.float32)[:20]))
+        self.assertTrue(np.array_equal(bundle.inputs, bundle.targets))
 
 if __name__ == "__main__": unittest.main()
