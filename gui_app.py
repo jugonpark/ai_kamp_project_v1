@@ -703,12 +703,14 @@ class MainWindow(QMainWindow):
         if run is not None:
             path = append_evaluation_result(run, result); self._log(f"Evaluation result saved: {path}")
         if result["fallback_used"]: self._log(f"Threshold fallback: {result['fallback_reason']}")
+        self.evaluation_pages.setCurrentIndex(1)
 
     def _comparison_results(self, results):
         for result in results: self._append_comparison(result)
         if results:
             self._evaluation_result_without_history(results[-1])
             self.eval_status_label.setText(f"모델: {results[-1].get('model','')}    Pipeline: {SCORE_METHODS[results[-1]['score_method']].display_name} → {self._result_temporal_display(results[-1])} → {THRESHOLD_METHODS[results[-1]['threshold_method']].display_name}    상태: 완료")
+            self.evaluation_pages.setCurrentIndex(1)
         self._log(f"Evaluation comparison completed: {len(results)} configurations")
 
     @staticmethod

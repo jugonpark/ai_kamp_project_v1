@@ -103,6 +103,32 @@ class EvaluationGuiTests(unittest.TestCase):
         self.assertIn("상태: 완료", window.eval_status_label.text())
         window.close()
 
+    def test_completed_evaluation_opens_results_page(self):
+        from gui_app import MainWindow
+        window = MainWindow()
+        result = {"model": "CNN", "score_method": "LAST_STEP_MSE",
+                  "threshold_method": "PR_INTERSECTION", "threshold": .1,
+                  "accuracy": 1., "balanced_accuracy": 1., "precision": 1.,
+                  "recall": 1., "f1": 1., "specificity": 1.,
+                  "fpr": 0., "fnr": 0., "tn": 2, "fp": 0, "fn": 0,
+                  "tp": 2, "fallback_used": False, "fallback_reason": ""}
+        try:
+            window.evaluation_pages.setCurrentIndex(0)
+            with patch("gui_app.append_evaluation_result") as save_result:
+                window._evaluation_result(result)
+            save_result.assert_called_once()
+            self.assertEqual(window.evaluation_pages.currentIndex(), 1)
+
+            window.evaluation_pages.setCurrentIndex(0)
+            window._comparison_results([result])
+            self.assertEqual(window.evaluation_pages.currentIndex(), 1)
+
+            window.evaluation_pages.setCurrentIndex(0)
+            window._comparison_results([])
+            self.assertEqual(window.evaluation_pages.currentIndex(), 0)
+        finally:
+            window.close()
+
     def test_duplicate_history_is_rejected_and_manual_baseline_champion_work(self):
         from gui_app import MainWindow
         window = MainWindow()
