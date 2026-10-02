@@ -234,6 +234,22 @@ class EvaluationGuiTests(unittest.TestCase):
             shutil.rmtree(folder, ignore_errors=True)
             window.close()
 
+    def test_import_history_formats_mixed_blank_and_numeric_kernel(self):
+        from gui_app import MainWindow
+        window = MainWindow()
+        folder = Path.cwd() / "outputs" / ".test_artifacts" / uuid.uuid4().hex
+        try:
+            folder.mkdir(parents=True)
+            path = folder / "history.csv"
+            path.write_text("experiment_name,cnn_kernel_size\nlegacy,\ncnn,5\n", encoding="utf-8")
+            with patch("gui_app.QFileDialog.getOpenFileName", return_value=(str(path), "CSV Files (*.csv)")):
+                window.import_historical_result()
+            self.assertEqual(window.comparison_table.item(0, 3).text(), "unknown")
+            self.assertEqual(window.comparison_table.item(1, 3).text(), "5")
+        finally:
+            shutil.rmtree(folder, ignore_errors=True)
+            window.close()
+
     def test_preset_and_config_load_update_actual_widgets(self):
         from gui_app import MainWindow
         from training_config import save_training_config

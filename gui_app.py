@@ -626,7 +626,12 @@ class MainWindow(QMainWindow):
         score_display = SCORE_METHODS[result["score_method"]].display_name if result.get("score_method") in SCORE_METHODS else result.get("score_name", result.get("score_method", ""))
         threshold_display = THRESHOLD_METHODS[result["threshold_method"]].display_name if result.get("threshold_method") in THRESHOLD_METHODS else result.get("threshold_name", result.get("threshold_method", ""))
         kernel = result.get("cnn_kernel_size")
-        kernel = "unknown" if kernel in (None, "") or isinstance(kernel, float) and math.isnan(kernel) else str(kernel)
+        if kernel in (None, "") or isinstance(kernel, float) and math.isnan(kernel):
+            kernel = "unknown"
+        elif isinstance(kernel, float) and kernel.is_integer():
+            kernel = str(int(kernel))
+        else:
+            kernel = str(kernel)
         values = (result.get("status", ""), result.get("model", "LSTM AutoEncoder"), result.get("experiment_name", ""), kernel, result.get("seed", ""), result.get("optimizer", ""),
                   result.get("learning_rate", ""), result.get("loss", ""), result.get("batch_size", ""), result.get("noise_std", ""), score_display,
                   threshold_display, number("threshold", 8), number("accuracy"), number("balanced_accuracy"), number("precision"), number("recall"), number("f1"),
