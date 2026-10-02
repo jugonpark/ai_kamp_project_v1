@@ -622,7 +622,7 @@ class MainWindow(QMainWindow):
     def _evaluation_loaded(self, summary):
         self._log(f"Evaluation model ready: {summary}")
         self.update_algorithm_description()
-        run = self.evaluation_run_combo.currentData()
+        run = getattr(self.evaluation_controller, "model_run", None)
         if run is not None and run.model_id in {"CNN_LSTM_AUTOENCODER", "DENOISING_CNN_LSTM_AUTOENCODER"}:
             self.loaded_architecture_label.setText(architecture_signature(run.metadata))
         else:

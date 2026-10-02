@@ -231,8 +231,8 @@ class EvaluationGuiTests(unittest.TestCase):
         try:
             run = ModelRun("CNN_LSTM_AUTOENCODER", "saved", Path("unused.keras"),
                            {"cnn_filters": 16, "cnn_kernel_size": 5, "bottleneck_units": 32})
-            window.evaluation_run_combo.addItem("saved", run)
-            window.evaluation_run_combo.setCurrentIndex(window.evaluation_run_combo.count() - 1)
+            window.evaluation_controller.select_run(run)
+            window.evaluation_model_combo.setCurrentIndex(window.evaluation_model_combo.findData("KAMP_LSTM_AE"))
             window._evaluation_loaded({"model_id": run.model_id})
             self.assertEqual(window.loaded_architecture_label.text(), "F16-K5-B32")
             run.metadata.pop("cnn_kernel_size")
