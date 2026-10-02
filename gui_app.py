@@ -298,6 +298,8 @@ class MainWindow(QMainWindow):
         selector_form.addRow("이상 점수", self.score_combo); selector_form.addRow("임계값 방식", self.threshold_combo)
         self.eval_status_label = QLabel("모델: LSTM AutoEncoder    점수: 마지막 시점 MSE    임계값: 정밀도-재현율 균형점    상태: 미불러옴")
         selector_form.addRow("현재 선택", self.eval_status_label)
+        self.loaded_architecture_label = QLabel("-")
+        selector_form.addRow("불러온 모델 구조", self.loaded_architecture_label)
         eval_layout.addWidget(selectors)
         eval_actions = QHBoxLayout()
         self.load_model_button = QPushButton("모델 불러오기"); self.load_model_button.clicked.connect(self.load_evaluation_model)
@@ -434,12 +436,14 @@ class MainWindow(QMainWindow):
     def _update_experiment_summary(self, *_):
         if not hasattr(self, "current_experiment_summary"): return
         noise = f"Gaussian std {self.noise_std_spin.value():g}" if self.training_model_combo.currentData() == "DENOISING_CNN_LSTM_AUTOENCODER" else "Off"
+        cnn = self.training_model_combo.currentData() in {"CNN_LSTM_AUTOENCODER", "DENOISING_CNN_LSTM_AUTOENCODER"}
+        architecture = (f"Architecture: F{self.cnn_filters_combo.currentData()} / K{self.cnn_kernel_combo.currentData()} / B{self.bottleneck_combo.currentData()}  "
+                        f"CNN Filters: {self.cnn_filters_combo.currentData()}  CNN Kernel: {self.cnn_kernel_combo.currentData()}  Bottleneck: {self.bottleneck_combo.currentData()}  ") if cnn else ""
         self.current_experiment_summary.setText(
             f"현재 실험 설정  |  {self.training_model_combo.currentText()}  |  "
             f"최대 에포크 {self.epochs_spin.value()}  배치 {self.batch_spin.value()}  학습률 {self.learning_rate_spin.value():g}\n"
             f"최적화 {self.optimizer_combo.currentText()}  손실 {self.loss_combo.currentText()}  "
-            f"시드 {self.seed_spin.value()}  Architecture: F{self.cnn_filters_combo.currentData()} / K{self.cnn_kernel_combo.currentData()} / B{self.bottleneck_combo.currentData()}  "
-            f"CNN Filters: {self.cnn_filters_combo.currentData()}  CNN Kernel: {self.cnn_kernel_combo.currentData()}  Bottleneck: {self.bottleneck_combo.currentData()}  노이즈 {noise}  프리셋 {self.preset_combo.currentText()}  "
+            f"시드 {self.seed_spin.value()}  {architecture}노이즈 {noise}  프리셋 {self.preset_combo.currentText()}  "
             f"실험 {self.experiment_name_edit.text().strip() or '자동 생성'}")
 
     def reset_training_config(self):
@@ -562,6 +566,7 @@ class MainWindow(QMainWindow):
 
     def refresh_evaluation_runs(self):
         self.evaluation_run_combo.clear()
+        self.loaded_architecture_label.setText("-")
         for run in discover_model_runs(self.evaluation_model_combo.currentData()): self.evaluation_run_combo.addItem(run.run_id, run)
         if hasattr(self, "score_combo"): self.update_algorithm_description()
 
@@ -617,6 +622,11 @@ class MainWindow(QMainWindow):
     def _evaluation_loaded(self, summary):
         self._log(f"Evaluation model ready: {summary}")
         self.update_algorithm_description()
+        run = self.evaluation_run_combo.currentData()
+        if run is not None and run.model_id in {"CNN_LSTM_AUTOENCODER", "DENOISING_CNN_LSTM_AUTOENCODER"}:
+            self.loaded_architecture_label.setText(architecture_signature(run.metadata))
+        else:
+            self.loaded_architecture_label.setText("-")
 
     def _evaluation_result(self, result):
         values = {"Threshold": f"{result['threshold']:.8g}", "Accuracy": f"{result['accuracy']:.6f}",

@@ -208,6 +208,39 @@ class EvaluationGuiTests(unittest.TestCase):
         self.assertEqual(window.comparison_table.item(0, 3).text(), "unknown")
         window.close()
 
+    def test_summary_omits_cnn_settings_for_non_cnn_model(self):
+        from gui_app import MainWindow
+        window = MainWindow()
+        try:
+            window.training_model_combo.addItem("KAMP LSTM AutoEncoder", "KAMP_LSTM_AE")
+            window.training_model_combo.setCurrentIndex(window.training_model_combo.findData("KAMP_LSTM_AE"))
+            self.app.processEvents()
+            summary = window.current_experiment_summary.text()
+            self.assertIn("KAMP LSTM AutoEncoder", summary)
+            self.assertNotIn("Architecture: F", summary)
+            self.assertNotIn("CNN Filters:", summary)
+            self.assertNotIn("CNN Kernel:", summary)
+            self.assertNotIn("Bottleneck:", summary)
+        finally:
+            window.close()
+
+    def test_loaded_run_shows_saved_cnn_architecture(self):
+        from gui_app import MainWindow
+        from model_artifacts import ModelRun
+        window = MainWindow()
+        try:
+            run = ModelRun("CNN_LSTM_AUTOENCODER", "saved", Path("unused.keras"),
+                           {"cnn_filters": 16, "cnn_kernel_size": 5, "bottleneck_units": 32})
+            window.evaluation_run_combo.addItem("saved", run)
+            window.evaluation_run_combo.setCurrentIndex(window.evaluation_run_combo.count() - 1)
+            window._evaluation_loaded({"model_id": run.model_id})
+            self.assertEqual(window.loaded_architecture_label.text(), "F16-K5-B32")
+            run.metadata.pop("cnn_kernel_size")
+            window._evaluation_loaded({"model_id": run.model_id})
+            self.assertEqual(window.loaded_architecture_label.text(), "unknown")
+        finally:
+            window.close()
+
     def test_cnn_architecture_controls_are_visible_and_drive_preview(self):
         from gui_app import MainWindow
         window = MainWindow(); window.show(); self.app.processEvents()
