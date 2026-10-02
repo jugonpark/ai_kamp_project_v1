@@ -38,8 +38,13 @@ class EvaluationControllerTests(unittest.TestCase):
         self.assertEqual(result["score_method"], "LAST_STEP_MSE")
         self.assertEqual(result["threshold_method"], "PR_INTERSECTION")
         self.assertEqual(result["cnn_kernel_size"], "unknown")
-        controller.model_run = SimpleNamespace(metadata={"cnn_kernel_size": 5})
-        self.assertEqual(controller.evaluate("LAST_STEP_MSE", "PR_INTERSECTION")["cnn_kernel_size"], 5)
+        self.assertEqual(result["cnn_filters"], "unknown")
+        self.assertEqual(result["bottleneck_units"], "unknown")
+        controller.model_run = SimpleNamespace(metadata={"cnn_filters":16, "cnn_kernel_size":5, "bottleneck_units":64})
+        result = controller.evaluate("LAST_STEP_MSE", "PR_INTERSECTION")
+        self.assertEqual(result["cnn_filters"], 16)
+        self.assertEqual(result["cnn_kernel_size"], 5)
+        self.assertEqual(result["bottleneck_units"], 64)
 
     def test_existing_prediction_bundle_is_reused(self):
         from evaluation_controller import EvaluationController

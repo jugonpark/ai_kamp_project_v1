@@ -170,7 +170,7 @@ class EvaluationGuiTests(unittest.TestCase):
     def test_every_training_parameter_has_help_and_launcher_exists(self):
         from gui_app import MainWindow
         window = MainWindow()
-        self.assertEqual(len(window.parameter_help_buttons), 22)
+        self.assertEqual(len(window.parameter_help_buttons), 24)
         window.show_parameter_guide("Learning Rate")
         self.assertIn("현재 값: 0.001", window.parameter_guide.text())
         self.assertTrue((Path.cwd() / "run_gui.bat").is_file())
@@ -185,7 +185,7 @@ class EvaluationGuiTests(unittest.TestCase):
         baseline_params = window.params_label.text()
         window.cnn_kernel_combo.setCurrentIndex(window.cnn_kernel_combo.findData(5))
         self.assertEqual(window._training_config_dict()["cnn_kernel_size"], 5)
-        self.assertIn("CNN Kernel 5", window.current_experiment_summary.text())
+        self.assertIn("CNN Kernel: 5", window.current_experiment_summary.text())
         self.assertIn("k=5", window.architecture_label.text())
         self.assertNotEqual(window.params_label.text(), baseline_params)
         window.show_parameter_guide("CNN Kernel Size")
@@ -207,6 +207,68 @@ class EvaluationGuiTests(unittest.TestCase):
         window._append_comparison(result)
         self.assertEqual(window.comparison_table.item(0, 3).text(), "unknown")
         window.close()
+
+    def test_cnn_architecture_controls_are_visible_and_drive_preview(self):
+        from gui_app import MainWindow
+        window = MainWindow(); window.show(); self.app.processEvents()
+        try:
+            for combo in (window.cnn_filters_combo, window.bottleneck_combo):
+                self.assertEqual([combo.itemData(i) for i in range(combo.count())], [16, 32, 64])
+                self.assertTrue(combo.isVisible())
+                self.assertIsNotNone(combo.parentWidget())
+            self.assertEqual((window.cnn_filters_combo.currentData(), window.bottleneck_combo.currentData()), (32, 32))
+            baseline_params = window.params_label.text()
+            window.cnn_filters_combo.setCurrentIndex(window.cnn_filters_combo.findData(16))
+            window.bottleneck_combo.setCurrentIndex(window.bottleneck_combo.findData(16))
+            self.assertEqual((window._training_config_dict()["cnn_filters"], window._training_config_dict()["bottleneck_units"]), (16, 16))
+            self.assertIn("Conv1D 16, k=3", window.architecture_label.text())
+            self.assertIn("LSTM64 → B16", window.architecture_label.text())
+            self.assertIn("LSTM16 → LSTM64", window.architecture_label.text())
+            self.assertNotEqual(window.params_label.text(), baseline_params)
+            self.assertIn("F16 / K3 / B16", window.current_experiment_summary.text())
+            window.show_parameter_guide("CNN Filters")
+            self.assertIn("현재 값: 16", window.parameter_guide.text())
+            window.show_parameter_guide("Bottleneck Units")
+            self.assertIn("현재 값: 16", window.parameter_guide.text())
+            window.training_model_combo.setCurrentIndex(window.training_model_combo.findData("DENOISING_CNN_LSTM_AUTOENCODER"))
+            self.app.processEvents()
+            self.assertTrue(window.cnn_filters_combo.isVisible())
+            self.assertTrue(window.bottleneck_combo.isVisible())
+            window._set_training_locked(True)
+            self.assertFalse(window.cnn_filters_combo.isEnabled())
+            self.assertFalse(window.bottleneck_combo.isEnabled())
+        finally:
+            window.close()
+
+    def test_cnn_architecture_presets_config_round_trip_and_legacy(self):
+        from gui_app import MainWindow, architecture_signature
+        from training_config import save_training_config
+        import json
+        window = MainWindow()
+        folder = Path.cwd() / "outputs" / ".test_artifacts" / uuid.uuid4().hex
+        try:
+            for preset, expected in (("CNN BOTTLENECK 16", (32, 3, 16)), ("CNN FILTER 16", (16, 3, 32))):
+                window.preset_combo.setCurrentIndex(window.preset_combo.findData(preset))
+                self.assertEqual((window.cnn_filters_combo.currentData(), window.cnn_kernel_combo.currentData(), window.bottleneck_combo.currentData()), expected)
+            window.cnn_filters_combo.setCurrentIndex(window.cnn_filters_combo.findData(64))
+            window.bottleneck_combo.setCurrentIndex(window.bottleneck_combo.findData(16))
+            saved = save_training_config(folder / "architecture.json", window._training_config_dict())
+            window.reset_training_config()
+            with patch("gui_app.QFileDialog.getOpenFileName", return_value=(str(saved), "JSON (*.json)")):
+                window.load_training_config()
+            self.assertEqual((window.cnn_filters_combo.currentData(), window.bottleneck_combo.currentData()), (64, 16))
+            old = window._training_config_dict()
+            old.pop("cnn_filters"); old.pop("bottleneck_units")
+            legacy_path = folder / "legacy.json"
+            legacy_path.write_text(json.dumps(old), encoding="utf-8")
+            with patch("gui_app.QFileDialog.getOpenFileName", return_value=(str(legacy_path), "JSON (*.json)")):
+                window.load_training_config()
+            self.assertEqual((window.cnn_filters_combo.currentData(), window.bottleneck_combo.currentData()), (32, 32))
+            self.assertEqual(architecture_signature({"cnn_filters": 32, "cnn_kernel_size": 3, "bottleneck_units": 16}), "F32-K3-B16")
+            self.assertEqual(architecture_signature({"cnn_kernel_size": 3}), "unknown")
+        finally:
+            shutil.rmtree(folder, ignore_errors=True)
+            window.close()
 
     def test_cnn_kernel_config_round_trip_and_legacy_default(self):
         from gui_app import MainWindow
@@ -245,7 +307,7 @@ class EvaluationGuiTests(unittest.TestCase):
             with patch("gui_app.QFileDialog.getOpenFileName", return_value=(str(path), "CSV Files (*.csv)")):
                 window.import_historical_result()
             self.assertEqual(window.comparison_table.item(0, 3).text(), "unknown")
-            self.assertEqual(window.comparison_table.item(1, 3).text(), "5")
+            self.assertEqual(window.comparison_table.item(1, 3).text(), "unknown")
         finally:
             shutil.rmtree(folder, ignore_errors=True)
             window.close()

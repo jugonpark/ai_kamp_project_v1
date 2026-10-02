@@ -31,7 +31,8 @@ class ArtifactAndTrainingTests(unittest.TestCase):
                 "reduce_lr_enabled":True,"reduce_lr_factor":.6,"reduce_lr_patience":3,"min_lr":1e-6,
                 "early_stopping_enabled":True,"early_stopping_patience":5,"early_stopping_min_delta":1e-5,
                 "restore_best_weights":True,"noise_type":"Gaussian","noise_mean":0,"noise_std":.01,
-                "noise_clip":True,"training_duration_seconds":1.25,"cnn_kernel_size":5}
+                "noise_clip":True,"training_duration_seconds":1.25,"cnn_kernel_size":5,
+                "cnn_filters":16,"bottleneck_units":64}
         folder = Path.cwd() / "outputs" / ".test_artifacts" / uuid.uuid4().hex
         try:
           with patch.object(model_artifacts, "RUNS_ROOT", folder):
@@ -45,8 +46,12 @@ class ArtifactAndTrainingTests(unittest.TestCase):
             self.assertEqual(metadata["noise_generation"], "dynamic_per_batch")
             self.assertEqual(metadata["noise_std"], .01)
             self.assertEqual(metadata["cnn_kernel_size"], 5)
+            self.assertEqual(metadata["cnn_filters"], 16)
+            self.assertEqual(metadata["bottleneck_units"], 64)
             summary = json.loads((run.model_path.parent / "experiment_summary.json").read_text(encoding="utf-8"))
             self.assertEqual(summary["cnn_kernel_size"], 5)
+            self.assertEqual(summary["cnn_filters"], 16)
+            self.assertEqual(summary["bottleneck_units"], 64)
             path = model_artifacts.append_evaluation_result(run, {"f1":.9})
             self.assertTrue(path.is_file())
         finally:
@@ -93,6 +98,8 @@ class ArtifactAndTrainingTests(unittest.TestCase):
             with patch.object(model_artifacts, "RUNS_ROOT", folder):
                 run = model_artifacts.discover_model_runs("CNN_LSTM_AUTOENCODER")[0]
             self.assertEqual(run.metadata["cnn_kernel_size"], "unknown")
+            self.assertEqual(run.metadata["cnn_filters"], "unknown")
+            self.assertEqual(run.metadata["bottleneck_units"], "unknown")
             self.assertEqual(run.model_path, run_dir / "model.keras")
         finally:
             shutil.rmtree(folder, ignore_errors=True)
