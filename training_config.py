@@ -15,7 +15,7 @@ def default_training_config() -> dict:
         "epochs": 800, "batch_size": 128, "learning_rate": 0.001,
         "optimizer": "Adam", "loss": "MSE", "huber_delta": 1.0,
         "weight_decay": 0.0001, "random_seed": 42, "experiment_name": "",
-        "cnn_kernel_size": 3,
+        "cnn_kernel_size": 3, "cnn_filters": 32, "bottleneck_units": 32,
         "reduce_lr_enabled": True, "reduce_lr_factor": 0.7,
         "reduce_lr_patience": 50, "min_lr": 0.0,
         "early_stopping_enabled": True, "early_stopping_patience": 120,
@@ -30,6 +30,10 @@ def validate_training_config(config: dict) -> dict:
     kernel_size = merged["cnn_kernel_size"]
     if type(kernel_size) is not int or kernel_size not in {3, 5, 7}:
         raise ValueError("CNN kernel size must be 3, 5, or 7")
+    for key, label in (("cnn_filters", "CNN filters"), ("bottleneck_units", "Bottleneck units")):
+        value = merged[key]
+        if type(value) is not int or value not in {16, 32, 64}:
+            raise ValueError(f"{label} must be 16, 32, or 64")
     checks = (
         (int(merged["epochs"]) > 0, "Epochs must be greater than 0"),
         (int(merged["batch_size"]) > 0, "Batch size must be greater than 0"),

@@ -2,6 +2,37 @@ import unittest
 import numpy as np
 
 class CnnExperimentTests(unittest.TestCase):
+    def test_default_cnn_baseline_architecture_is_unchanged(self):
+        from tensorflow.keras.layers import Conv1D, LSTM
+        from model_builders import build_cnn_lstm_autoencoder
+
+        model = build_cnn_lstm_autoencoder()
+        self.assertEqual([(layer.filters, layer.kernel_size) for layer in model.layers if isinstance(layer, Conv1D)],
+                         [(32, (3,)), (32, (3,))])
+        self.assertEqual([layer.units for layer in model.layers if isinstance(layer, LSTM)], [64, 32, 32, 64])
+        self.assertEqual(model.output_shape, (None, 20, 3))
+
+    def test_cnn_and_denoising_architecture_settings_reach_both_sides(self):
+        from tensorflow.keras.layers import Conv1D, LSTM
+        from model_registry import MODEL_REGISTRY
+        from training_engine import build_training_model
+        from training_config import default_training_config
+
+        counts = {}
+        for model_id in ("CNN_LSTM_AUTOENCODER", "DENOISING_CNN_LSTM_AUTOENCODER"):
+            for filters, bottleneck in ((32, 32), (16, 32), (32, 16), (16, 16), (64, 64)):
+                with self.subTest(model_id=model_id, filters=filters, bottleneck=bottleneck):
+                    config = default_training_config()
+                    config.update(cnn_filters=filters, bottleneck_units=bottleneck, cnn_kernel_size=5)
+                    model = build_training_model(MODEL_REGISTRY[model_id], config)
+                    self.assertEqual([layer.filters for layer in model.layers if isinstance(layer, Conv1D)], [filters, filters])
+                    self.assertEqual([layer.kernel_size for layer in model.layers if isinstance(layer, Conv1D)], [(5,), (5,)])
+                    self.assertEqual([layer.units for layer in model.layers if isinstance(layer, LSTM)], [64, bottleneck, bottleneck, 64])
+                    self.assertEqual(model.output_shape, (None, 20, 3))
+                    counts[(model_id, filters, bottleneck)] = model.count_params()
+            self.assertNotEqual(counts[(model_id, 32, 32)], counts[(model_id, 16, 32)])
+            self.assertNotEqual(counts[(model_id, 32, 32)], counts[(model_id, 32, 16)])
+
     def test_cnn_and_denoising_builders_use_selected_kernel_twice(self):
         from tensorflow.keras.layers import Conv1D
         from model_registry import MODEL_REGISTRY

@@ -28,7 +28,9 @@ def build_loss(config):
 
 def build_training_model(spec, config):
     if spec.id in {"CNN_LSTM_AUTOENCODER", "DENOISING_CNN_LSTM_AUTOENCODER"}:
-        return spec.builder(kernel_size=config["cnn_kernel_size"])
+        return spec.builder(kernel_size=config["cnn_kernel_size"],
+                            cnn_filters=config.get("cnn_filters", 32),
+                            bottleneck_units=config.get("bottleneck_units", 32))
     return spec.builder()
 
 

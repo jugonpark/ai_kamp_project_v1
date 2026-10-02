@@ -17,6 +17,17 @@ class TrainingConfigTests(unittest.TestCase):
                     "noise_mean", "noise_std", "noise_clip"):
             self.assertIn(key, config)
         self.assertEqual(config["cnn_kernel_size"], 3)
+        self.assertEqual(config["cnn_filters"], 32)
+        self.assertEqual(config["bottleneck_units"], 32)
+
+    def test_cnn_architecture_values_accept_only_supported_integers(self):
+        from training_config import validate_training_config
+        for key in ("cnn_filters", "bottleneck_units"):
+            for value in (16, 32, 64):
+                self.assertEqual(validate_training_config({key: value})[key], value)
+            for value in (0, 15, 33, 128, 16.0, "16", True):
+                with self.subTest(key=key, value=value), self.assertRaisesRegex(ValueError, "16, 32, or 64"):
+                    validate_training_config({key: value})
 
     def test_cnn_kernel_size_accepts_only_supported_integer_values(self):
         from training_config import validate_training_config
@@ -43,7 +54,7 @@ class TrainingConfigTests(unittest.TestCase):
 
     def test_config_save_load_round_trip_preserves_callbacks(self):
         from training_config import default_training_config, load_training_config, save_training_config
-        config = default_training_config(); config.update({"experiment_name":"ROUND_TRIP", "reduce_lr_factor":.6, "early_stopping_patience":77, "cnn_kernel_size":5})
+        config = default_training_config(); config.update({"experiment_name":"ROUND_TRIP", "reduce_lr_factor":.6, "early_stopping_patience":77, "cnn_kernel_size":5, "cnn_filters":16, "bottleneck_units":64})
         folder = Path.cwd() / "outputs" / ".test_artifacts" / uuid.uuid4().hex
         try:
             path = save_training_config(folder / "config.json", config)
@@ -54,10 +65,14 @@ class TrainingConfigTests(unittest.TestCase):
         self.assertEqual(loaded["reduce_lr_factor"], .6)
         self.assertEqual(loaded["early_stopping_patience"], 77)
         self.assertEqual(loaded["cnn_kernel_size"], 5)
+        self.assertEqual(loaded["cnn_filters"], 16)
+        self.assertEqual(loaded["bottleneck_units"], 64)
 
     def test_legacy_config_defaults_kernel_to_three(self):
         from training_config import validate_training_config
         self.assertEqual(validate_training_config({"epochs": 10})["cnn_kernel_size"], 3)
+        self.assertEqual(validate_training_config({"epochs": 10})["cnn_filters"], 32)
+        self.assertEqual(validate_training_config({"epochs": 10})["bottleneck_units"], 32)
 
     def test_optimizer_and_huber_settings_reach_keras_objects(self):
         from training_config import default_training_config
