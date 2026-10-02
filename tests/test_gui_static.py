@@ -15,6 +15,35 @@ class EvaluationGuiTests(unittest.TestCase):
         from PySide6.QtWidgets import QApplication
         cls.app = QApplication.instance() or QApplication([])
 
+    def test_evaluation_settings_and_results_are_separate_pages(self):
+        from gui_app import MainWindow
+        from PySide6.QtWidgets import QGridLayout
+        window = MainWindow()
+        try:
+            window.resize(1100, 700)
+            window.tabs.setCurrentWidget(window.evaluation_pages.parentWidget())
+            window.show(); self.app.processEvents()
+            pages = window.evaluation_pages
+            self.assertEqual([pages.tabText(i) for i in range(pages.count())], ["평가 설정·설명", "결과·기록"])
+            self.assertLess(pages.minimumSizeHint().width(), 1100)
+            self.assertTrue(window.evaluation_run_combo.isVisible())
+            self.assertTrue(window.algorithm_description.isVisible())
+            self.assertTrue(window.run_evaluation_button.isVisible())
+            self.assertFalse(window.comparison_table.isVisible())
+            self.assertIsInstance(window.run_evaluation_button.parentWidget().layout().itemAt(1).layout(), QGridLayout)
+            pages.setCurrentIndex(1); self.app.processEvents()
+            self.assertTrue(window.comparison_table.isVisible())
+            self.assertTrue(window.export_comparison_button.isVisible())
+            self.assertFalse(window.evaluation_run_combo.isVisible())
+            self.assertFalse(window.run_evaluation_button.isVisible())
+            pages.setCurrentIndex(0); self.app.processEvents()
+            window.lock_evaluation_method.setChecked(True)
+            self.assertFalse(window.score_combo.isEnabled())
+            window.lock_evaluation_method.setChecked(False)
+            self.assertTrue(window.score_combo.isEnabled())
+        finally:
+            window.close()
+
     def test_default_selectors_preserve_kamp_baseline(self):
         from gui_app import MainWindow
         window = MainWindow()
