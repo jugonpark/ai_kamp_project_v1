@@ -295,7 +295,26 @@ class MainWindow(QMainWindow):
         for method in THRESHOLD_METHODS.values(): self.threshold_combo.addItem(method.display_name, method.id)
         self.score_combo.currentIndexChanged.connect(self.update_algorithm_description)
         self.threshold_combo.currentIndexChanged.connect(self.update_algorithm_description)
-        selector_form.addRow("이상 점수", self.score_combo); selector_form.addRow("임계값 방식", self.threshold_combo)
+        self.temporal_combo = QComboBox()
+        self.temporal_combo.addItem("사용 안 함", "NONE")
+        self.temporal_combo.addItem("EWMA", "EWMA")
+        self.ewma_alpha_spin = QDoubleSpinBox()
+        self.ewma_alpha_spin.setRange(0.01, 1.00)
+        self.ewma_alpha_spin.setSingleStep(0.01)
+        self.ewma_alpha_spin.setDecimals(2)
+        self.ewma_alpha_spin.setValue(0.40)
+        self.ewma_alpha_spin.setEnabled(False)
+        self.ewma_alpha_spin.setButtonSymbols(QAbstractSpinBox.NoButtons)
+        self.timestamp_aware_check = QCheckBox("ON")
+        self.timestamp_aware_check.setChecked(True)
+        self.temporal_combo.currentIndexChanged.connect(self._temporal_selection_changed)
+        self.ewma_alpha_spin.valueChanged.connect(self.update_algorithm_description)
+        self.timestamp_aware_check.toggled.connect(self._temporal_selection_changed)
+        selector_form.addRow("이상 점수", self.score_combo)
+        selector_form.addRow("시간축 점수 처리", self.temporal_combo)
+        selector_form.addRow("EWMA α", self.ewma_alpha_spin)
+        selector_form.addRow("Timestamp 연속성 고려", self.timestamp_aware_check)
+        selector_form.addRow("임계값 방식", self.threshold_combo)
         self.eval_status_label = QLabel("모델: LSTM AutoEncoder    점수: 마지막 시점 MSE    임계값: 정밀도-재현율 균형점    상태: 미불러옴")
         selector_form.addRow("현재 선택", self.eval_status_label)
         self.loaded_architecture_label = QLabel("-")
@@ -305,6 +324,7 @@ class MainWindow(QMainWindow):
         self.load_model_button = QPushButton("모델 불러오기"); self.load_model_button.clicked.connect(self.load_evaluation_model)
         self.run_evaluation_button = QPushButton("평가 실행"); self.run_evaluation_button.clicked.connect(self.run_evaluation)
         self.compare_all_button = QPushButton("전체 방식 비교"); self.compare_all_button.clicked.connect(self.compare_all)
+        self.sweep_ewma_button = QPushButton("EWMA α 비교"); self.sweep_ewma_button.clicked.connect(self.sweep_ewma)
         self.compare_models_button = QPushButton("모델 비교"); self.compare_models_button.clicked.connect(self.compare_models)
         self.clear_comparison_button = QPushButton("비교 기록 비우기"); self.clear_comparison_button.clicked.connect(self.clear_comparison)
         self.export_comparison_button = QPushButton("비교 CSV 저장"); self.export_comparison_button.clicked.connect(self.export_comparison)
@@ -312,7 +332,7 @@ class MainWindow(QMainWindow):
         self.set_baseline_button = QPushButton("기준 실험으로 지정"); self.set_baseline_button.clicked.connect(self.set_current_as_baseline)
         self.set_champion_button = QPushButton("최고 실험으로 지정"); self.set_champion_button.clicked.connect(self.set_current_as_champion)
         self.show_history_graph_button = QPushButton("학습 곡선 보기"); self.show_history_graph_button.clicked.connect(self.show_evaluation_graph)
-        for button in (self.load_model_button, self.run_evaluation_button, self.compare_all_button, self.compare_models_button, self.clear_comparison_button, self.export_comparison_button, self.import_history_button, self.set_baseline_button, self.set_champion_button, self.show_history_graph_button): eval_actions.addWidget(button)
+        for button in (self.load_model_button, self.run_evaluation_button, self.compare_all_button, self.sweep_ewma_button, self.compare_models_button, self.clear_comparison_button, self.export_comparison_button, self.import_history_button, self.set_baseline_button, self.set_champion_button, self.show_history_graph_button): eval_actions.addWidget(button)
         eval_layout.addLayout(eval_actions)
         description_box = QGroupBox("평가 방식 설명"); description_layout = QVBoxLayout(description_box)
         self.algorithm_description = QLabel(); self.algorithm_description.setWordWrap(True); description_layout.addWidget(self.algorithm_description); eval_layout.addWidget(description_box)
@@ -332,7 +352,7 @@ class MainWindow(QMainWindow):
             combo = QComboBox(); combo.addItem("전체", "ALL"); combo.currentIndexChanged.connect(self.apply_history_filters); self.history_filters[name] = combo
             filter_layout.addWidget(QLabel({"Model":"모델", "Status":"상태", "Score":"점수", "Threshold":"임계값 방식", "Loss":"손실 함수", "Seed":"시드"}[name])); filter_layout.addWidget(combo)
         history_layout.addLayout(filter_layout)
-        columns = ["상태", "모델", "실험", "Architecture", "시드", "최적화", "학습률", "손실 함수", "배치", "노이즈 표준편차", "점수", "임계값 방식", "임계값", "정확도", "균형 정확도", "정밀도", "재현율", "F1", "정상 정확 판정 (TN)", "오경보 (FP)", "미탐 (FN)", "이상 정확 탐지 (TP)", "최적 에포크", "최적 검증 손실", "학습 시간", "생성 시각"]
+        columns = ["상태", "모델", "실험", "Architecture", "시드", "최적화", "학습률", "손실 함수", "배치", "노이즈 표준편차", "점수", "임계값 방식", "임계값", "정확도", "균형 정확도", "정밀도", "재현율", "F1", "정상 정확 판정 (TN)", "오경보 (FP)", "미탐 (FN)", "이상 정확 탐지 (TP)", "최적 에포크", "최적 검증 손실", "학습 시간", "생성 시각", "Temporal", "Alpha", "Timestamp Reset", "Total Error", "Delay", "Pareto"]
         self.comparison_table = QTableWidget(0, len(columns)); self.comparison_table.setHorizontalHeaderLabels(columns)
         history_layout.addWidget(self.comparison_table); eval_layout.addWidget(history_box, 1)
         self.lock_evaluation_method = QCheckBox("동일 조건 비교: 점수·임계값 방식 잠금"); self.lock_evaluation_method.toggled.connect(lambda locked: (self.score_combo.setEnabled(not locked), self.threshold_combo.setEnabled(not locked))); eval_layout.addWidget(self.lock_evaluation_method)
@@ -577,12 +597,34 @@ class MainWindow(QMainWindow):
         spec = MODEL_REGISTRY[self.evaluation_model_combo.currentData()]
         error_name = "Prediction Error" if spec.task_type == "FORECAST" else "Reconstruction Error"
         description = score.description.replace("Reconstruction Error", error_name).replace("복원 오차", "예측 오차" if spec.task_type == "FORECAST" else "복원 오차")
-        self.algorithm_description.setText(f"{score.display_name} ({'예측 오차' if spec.task_type == 'FORECAST' else '복원 오차'})\n{description}\n\n{threshold.display_name}\n{threshold.description}")
+        temporal = self.temporal_combo.currentData()
+        if temporal == "EWMA":
+            temporal_description = ("EWMA: 기존 이상점수를 시간 순서대로 지수가중 이동평균하여 순간 변동을 완화합니다.\n"
+                "EWMA[t] = alpha * score[t] + (1-alpha) * EWMA[t-1]\n"
+                "작은 alpha는 과거 점수를 오래 기억해 오경보를 줄일 수 있지만 탐지가 늦어질 수 있습니다. "
+                "큰 alpha는 현재 점수에 빠르게 반응하지만 평활 효과가 작습니다. "
+                "원본 센서가 아닌 모델의 이상점수에 적용하는 후처리입니다.\n"
+                "Timestamp 연속성 고려: 비정상적으로 긴 시간 간격에서는 EWMA 상태를 초기화합니다.")
+        else:
+            temporal_description = "시간축 점수 처리 없음: 기존 이상점수를 그대로 임계값 계산에 사용합니다."
+        self.algorithm_description.setText(f"{score.display_name} ({'예측 오차' if spec.task_type == 'FORECAST' else '복원 오차'})\n{description}\n\n{temporal_description}\n\n{threshold.display_name}\n{threshold.description}")
         status = "준비" if self.evaluation_controller.is_loaded else "미불러옴"; spec = MODEL_REGISTRY[self.evaluation_model_combo.currentData()]
-        self.eval_status_label.setText(f"모델: {spec.display_name}    점수: {score.display_name}    임계값: {threshold.display_name}    상태: {status}")
+        self.eval_status_label.setText(f"모델: {spec.display_name}    Pipeline: {score.display_name} → {self._temporal_display()} → {threshold.display_name}    상태: {status}")
+
+    def _temporal_display(self):
+        if self.temporal_combo.currentData() != "EWMA":
+            return "NONE"
+        return f"EWMA α={self.ewma_alpha_spin.value():.2f} → Timestamp Reset {'ON' if self.timestamp_aware_check.isChecked() else 'OFF'}"
+
+    def _temporal_selection_changed(self):
+        self.ewma_alpha_spin.setEnabled(self.temporal_combo.currentData() == "EWMA")
+        self.timestamp_aware_check.setText("ON" if self.timestamp_aware_check.isChecked() else "OFF")
+        self.update_algorithm_description()
 
     def _set_evaluation_busy(self, busy):
-        for button in (self.load_model_button, self.run_evaluation_button, self.compare_all_button, self.compare_models_button): button.setEnabled(not busy)
+        for button in (self.load_model_button, self.run_evaluation_button, self.compare_all_button, self.sweep_ewma_button, self.compare_models_button): button.setEnabled(not busy)
+        for widget in (self.temporal_combo, self.ewma_alpha_spin, self.timestamp_aware_check):
+            widget.setEnabled(not busy and (widget is not self.ewma_alpha_spin or self.temporal_combo.currentData() == "EWMA"))
 
     def _start_evaluation_worker(self, action):
         if self.evaluation_thread and self.evaluation_thread.isRunning():
@@ -594,7 +636,9 @@ class MainWindow(QMainWindow):
         self._set_evaluation_busy(True)
         self.evaluation_thread = QThread(self)
         self.evaluation_worker = EvaluationWorker(self.evaluation_controller, action,
-            self.score_combo.currentData(), self.threshold_combo.currentData())
+            self.score_combo.currentData(), self.threshold_combo.currentData(),
+            self.temporal_combo.currentData(), self.ewma_alpha_spin.value(),
+            self.timestamp_aware_check.isChecked())
         self.evaluation_worker.moveToThread(self.evaluation_thread)
         self.evaluation_thread.started.connect(self.evaluation_worker.run)
         self.evaluation_worker.status_changed.connect(self._update_evaluation_status)
@@ -613,11 +657,12 @@ class MainWindow(QMainWindow):
         self.evaluation_controller.select_run(run); self._start_evaluation_worker("load")
     def run_evaluation(self): self._start_evaluation_worker("evaluate")
     def compare_all(self): self._start_evaluation_worker("compare_all")
+    def sweep_ewma(self): self._start_evaluation_worker("sweep_ewma")
     def compare_models(self): self._start_evaluation_worker("compare_models")
 
     def _update_evaluation_status(self, status):
         spec = MODEL_REGISTRY[self.evaluation_model_combo.currentData()]
-        self.eval_status_label.setText(f"모델: {spec.display_name}    점수: {self.score_combo.currentText()}    임계값: {self.threshold_combo.currentText()}    상태: {status}")
+        self.eval_status_label.setText(f"모델: {spec.display_name}    Pipeline: {self.score_combo.currentText()} → {self._temporal_display()} → {self.threshold_combo.currentText()}    상태: {status}")
 
     def _evaluation_loaded(self, summary):
         self._log(f"Evaluation model ready: {summary}")
@@ -636,7 +681,7 @@ class MainWindow(QMainWindow):
             "TN": str(result['tn']), "FP (False Alarm)": str(result['fp']), "FN (Missed Anomaly)": str(result['fn']),
             "TP": str(result['tp']), "Fallback": result['fallback_reason'] if result['fallback_used'] else "No"}
         for key, value in values.items(): self.eval_result_labels[key].setText(value)
-        self.eval_status_label.setText(f"모델: {result['model']}    점수: {SCORE_METHODS[result['score_method']].display_name}    임계값: {THRESHOLD_METHODS[result['threshold_method']].display_name}    상태: 완료")
+        self.eval_status_label.setText(f"모델: {result['model']}    Pipeline: {SCORE_METHODS[result['score_method']].display_name} → {self._result_temporal_display(result)} → {THRESHOLD_METHODS[result['threshold_method']].display_name}    상태: 완료")
         self._append_comparison(result)
         run = self.evaluation_run_combo.currentData()
         if run is not None:
@@ -647,8 +692,18 @@ class MainWindow(QMainWindow):
         for result in results: self._append_comparison(result)
         if results:
             self._evaluation_result_without_history(results[-1])
-            self.eval_status_label.setText(f"모델: {results[-1].get('model','')}    점수: {SCORE_METHODS[results[-1]['score_method']].display_name}    임계값: {THRESHOLD_METHODS[results[-1]['threshold_method']].display_name}    상태: 완료")
-        self._log(f"Compare All completed: {len(results)} configurations")
+            self.eval_status_label.setText(f"모델: {results[-1].get('model','')}    Pipeline: {SCORE_METHODS[results[-1]['score_method']].display_name} → {self._result_temporal_display(results[-1])} → {THRESHOLD_METHODS[results[-1]['threshold_method']].display_name}    상태: 완료")
+        self._log(f"Evaluation comparison completed: {len(results)} configurations")
+
+    @staticmethod
+    def _result_temporal_display(result):
+        if result.get("temporal_method", "NONE") != "EWMA":
+            return "NONE"
+        try:
+            alpha = f"{float(result.get('ewma_alpha', 0.4)):.2f}"
+        except (TypeError, ValueError):
+            alpha = "?"
+        return f"EWMA α={alpha} → Timestamp Reset {'ON' if result.get('timestamp_aware', True) else 'OFF'}"
 
     def _evaluation_result_without_history(self, result):
         values = {"Threshold": f"{result['threshold']:.8g}", "Accuracy": f"{result['accuracy']:.6f}",
@@ -662,7 +717,9 @@ class MainWindow(QMainWindow):
     def _append_comparison(self, result):
         fingerprint = (str(result.get("model_id", result.get("model", ""))), str(result.get("experiment_name", "")),
                        str(result.get("score_method", result.get("score_name", ""))), str(result.get("threshold_method", result.get("threshold_name", ""))),
-                       str(result.get("threshold", "")), str(result.get("created_at", "")))
+                       str(result.get("threshold", "")), str(result.get("created_at", "")),
+                       str(result.get("temporal_method", "NONE")), str(result.get("ewma_alpha", "")),
+                       str(result.get("timestamp_aware", True)))
         if any(item.get("_fingerprint") == fingerprint for item in self.comparison_history): return
         result = result.copy(); result["_fingerprint"] = fingerprint
         self.comparison_history.append(result.copy())
@@ -675,8 +732,10 @@ class MainWindow(QMainWindow):
         values = (result.get("status", ""), result.get("model", "LSTM AutoEncoder"), result.get("experiment_name", ""), architecture_signature(result), result.get("seed", ""), result.get("optimizer", ""),
                   result.get("learning_rate", ""), result.get("loss", ""), result.get("batch_size", ""), result.get("noise_std", ""), score_display,
                   threshold_display, number("threshold", 8), number("accuracy"), number("balanced_accuracy"), number("precision"), number("recall"), number("f1"),
-                  result.get("tn", ""), result.get("fp", ""), result.get("fn", ""), result.get("tp", ""), result.get("best_epoch", ""), result.get("best_val_loss", ""), result.get("training_time", ""), result.get("created_at", ""))
-        for column, value in enumerate(values): self.comparison_table.setItem(row, column, QTableWidgetItem(value))
+                  result.get("tn", ""), result.get("fp", ""), result.get("fn", ""), result.get("tp", ""), result.get("best_epoch", ""), result.get("best_val_loss", ""), result.get("training_time", ""), result.get("created_at", ""),
+                  result.get("temporal_method", "NONE"), result.get("ewma_alpha", ""), result.get("timestamp_aware", True), result.get("total_error", ""),
+                  result.get("detection_delay_samples", ""), result.get("pareto", ""))
+        for column, value in enumerate(values): self.comparison_table.setItem(row, column, QTableWidgetItem(str(value)))
         self.comparison_table.item(row, 0).setData(Qt.UserRole, len(self.comparison_history) - 1)
         self._refresh_filter_values(); self.apply_history_filters()
         if hasattr(self, "comparison_summary_label"): self._update_comparison_summary()
@@ -751,6 +810,10 @@ class MainWindow(QMainWindow):
                       "score_method":row.get("score_method", row.get("Score Method", "")), "threshold_method":row.get("threshold_method", row.get("Threshold Method", "")),
                       "score_name": row.get("score_method", row.get("Score Method", "")), "threshold_name": row.get("threshold_method", row.get("Threshold Method", "")),
                       "threshold": row.get("threshold", ""), "accuracy": row.get("accuracy", ""), "precision": row.get("precision", ""),
+                      "temporal_method": row.get("temporal_method", "NONE"), "ewma_alpha": row.get("ewma_alpha", ""),
+                      "timestamp_aware": row.get("timestamp_aware", True), "timestamp_gap_threshold": row.get("timestamp_gap_threshold", ""),
+                      "total_error": row.get("total_error", ""), "detection_delay_samples": row.get("detection_delay_samples", ""),
+                      "detection_delay_seconds": row.get("detection_delay_seconds", ""), "pareto": row.get("pareto", ""),
                       "balanced_accuracy":row.get("balanced_accuracy", ""), "recall": row.get("recall", ""), "f1": row.get("f1", row.get("F1", "")), "tn":safe_int(row.get("tn", row.get("TN", 0))), "fp":safe_int(row.get("fp", row.get("FP", 0))), "fn":safe_int(row.get("fn", row.get("FN", 0))), "tp":safe_int(row.get("tp", row.get("TP", 0))), "best_epoch":row.get("best_epoch", ""), "best_val_loss":row.get("best_val_loss", ""), "training_time":row.get("training_time", ""), "created_at":row.get("created_at", "")}
             self._append_comparison(result)
         self._log(f"Historical result imported: {path}")
@@ -764,7 +827,8 @@ class MainWindow(QMainWindow):
         keys = ["status", "model_id", "model", "experiment_name", "cnn_filters", "cnn_kernel_size", "bottleneck_units", "seed", "optimizer", "learning_rate", "loss", "batch_size", "noise_std",
                 "score_method", "threshold_method", "threshold", "accuracy", "balanced_accuracy", "precision", "recall", "f1", "specificity", "fpr", "fnr",
                 "tn", "fp", "fn", "tp", "best_epoch", "best_val_loss", "training_time", "created_at",
-                "effective_threshold_method", "fallback_used", "fallback_reason"]
+                "effective_threshold_method", "fallback_used", "fallback_reason", "temporal_method", "ewma_alpha", "timestamp_aware",
+                "timestamp_gap_threshold", "total_error", "detection_delay_samples", "detection_delay_seconds", "pareto"]
         with path.open("x", newline="", encoding="utf-8-sig") as handle:
             writer = csv.DictWriter(handle, fieldnames=keys); writer.writeheader()
             for result in self.comparison_history: writer.writerow({key: result.get(key, "") for key in keys})

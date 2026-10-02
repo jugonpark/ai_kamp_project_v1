@@ -41,7 +41,7 @@ class EvaluationGuiTests(unittest.TestCase):
                     "early_stopping_enabled","early_stopping_patience","early_stopping_min_delta",
                     "restore_best_weights","noise_type","noise_mean","noise_std","noise_clip"}
         self.assertTrue(required.issubset(config))
-        self.assertEqual(window.comparison_table.columnCount(), 26)
+        self.assertEqual(window.comparison_table.columnCount(), 32)
         self.assertEqual(set(window.history_filters), {"Model","Status","Score","Threshold","Loss","Seed"})
         window.close()
 

@@ -63,5 +63,83 @@ class EvaluationControllerTests(unittest.TestCase):
         self.assertEqual(controller.model_spec.task_type, "FORECAST")
         self.assertEqual(controller.model_spec.forecast_length, 5)
 
+    def test_temporal_threshold_uses_processed_validation_and_resets_test(self):
+        from evaluation_controller import EvaluationController
+        from threshold_methods import ThresholdResult
+        controller = EvaluationController()
+        controller._bundle = {
+            "valid_error": np.zeros((4, 1, 3)), "test_error": np.zeros((4, 1, 3)),
+            "y_valid": np.array([0, 0, 1, 1]), "y_test": np.array([0, 0, 1, 1]),
+            "valid_metadata": {"segment_ids": np.array([0, 0, 1, 1])},
+            "test_metadata": {"segment_ids": np.array([0, 0, 1, 1])},
+        }
+        outputs = [np.array([1., 3., 9., 11.]), np.array([20., 24., 30., 34.])]
+        def threshold(method, scores, labels):
+            np.testing.assert_allclose(scores, [1., 2., 9., 10.])
+            return ThresholdResult(15., method, method)
+        with patch("evaluation_controller.compute_scores", side_effect=outputs), \
+             patch("evaluation_controller.calculate_threshold", side_effect=threshold):
+            result = controller.evaluate("LAST_STEP_MSE", "NORMAL_P99", "EWMA", .5)
+        self.assertEqual(result["threshold"], 15.)
+        self.assertEqual(result["fp"], 2)
+        self.assertEqual(result["total_error"], result["fp"] + result["fn"])
+        self.assertEqual(result["ewma_alpha"], .5)
+
+    def test_none_scores_and_threshold_match_old_path(self):
+        from evaluation_controller import EvaluationController
+        controller = EvaluationController()
+        error = np.broadcast_to(np.arange(8., dtype=float).reshape(8, 1, 1), (8, 1, 3))
+        controller._bundle = {"valid_error": error, "test_error": error,
+                              "y_valid": np.array([0]*4 + [1]*4),
+                              "y_test": np.array([0]*4 + [1]*4)}
+        original = controller.evaluate("LAST_STEP_MSE", "NORMAL_P99")
+        explicit = controller.evaluate("LAST_STEP_MSE", "NORMAL_P99", "NONE")
+        for field in ("threshold", "accuracy", "precision", "recall", "f1", "fp", "fn"):
+            self.assertEqual(original[field], explicit[field])
+        self.assertEqual(explicit["ewma_alpha"], "")
+
+    def test_sweep_has_baseline_ten_alphas_and_pareto(self):
+        from evaluation_controller import EvaluationController
+        controller = EvaluationController()
+        calls = []
+        def fake_evaluate(score, threshold, temporal, alpha, aware):
+            calls.append((score, threshold, temporal, alpha, aware))
+            index = len(calls)
+            return {"fp": index, "fn": 12-index, "total_error": 12,
+                    "temporal_method": temporal, "ewma_alpha": alpha if temporal == "EWMA" else ""}
+        with patch.object(controller, "evaluate", side_effect=fake_evaluate):
+            results = controller.sweep_ewma_alphas("LAST_STEP_MSE", "NORMAL_P99", False)
+        self.assertEqual(len(results), 11)
+        self.assertEqual(calls[0][2], "NONE")
+        self.assertEqual(calls[-1][3], 1.0)
+        self.assertTrue(all(row["pareto"] for row in results))
+        self.assertEqual(results[-1]["delta_fp"], 10)
+
+    def test_timestamp_toggle_keeps_dataset_reset(self):
+        from evaluation_controller import EvaluationController
+        controller = EvaluationController()
+        controller._bundle = {
+            "valid_error": np.zeros((4, 1, 3)), "test_error": np.zeros((4, 1, 3)),
+            "y_valid": np.array([0, 0, 1, 1]), "y_test": np.array([0, 0, 1, 1]),
+            "valid_metadata": {"segment_ids": np.array([0, 1, 2, 2]),
+                               "stream_ids": np.array([0, 0, 1, 1]),
+                               "contains_timestamp_gap": np.array([False, True, False, False])},
+            "test_metadata": {"segment_ids": np.array([0, 1, 2, 2]),
+                              "stream_ids": np.array([0, 0, 1, 1]),
+                              "contains_timestamp_gap": np.array([False, True, False, False])},
+        }
+        scores = np.array([1., 3., 10., 12.])
+        captured = []
+        def threshold(method, values, labels):
+            captured.append(values.copy())
+            from threshold_methods import ThresholdResult
+            return ThresholdResult(5., method, method)
+        with patch("evaluation_controller.compute_scores", return_value=scores), \
+             patch("evaluation_controller.calculate_threshold", side_effect=threshold):
+            controller.evaluate("LAST_STEP_MSE", "NORMAL_P99", "EWMA", .5, True)
+            controller.evaluate("LAST_STEP_MSE", "NORMAL_P99", "EWMA", .5, False)
+        np.testing.assert_allclose(captured[0], [1., 3., 10., 11.])
+        np.testing.assert_allclose(captured[1], [1., 2., 10., 11.])
+
 
 if __name__ == "__main__": unittest.main()

@@ -8,6 +8,10 @@ import train_lstm_ae as core
 class TaskBundle:
     inputs: np.ndarray; targets: np.ndarray; labels: np.ndarray
     task_type: str; error_name: str
+    sample_timestamps: np.ndarray | None = None
+    segment_ids: np.ndarray | None = None
+    contains_timestamp_gap: np.ndarray | None = None
+    timestamp_gap_threshold: float | None = None
 
 def add_training_noise(inputs, mean=0.0, std=0.01, clip=True, seed=42):
     """Legacy one-shot helper; the training worker uses prepare_fit_data instead."""
@@ -55,4 +59,26 @@ def create_task_bundle(data, model_spec):
         error_name = "Prediction Error"
     else: raise ValueError(f"Unknown task type: {model_spec.task_type}")
     y = np.asarray([labels[i+core.SEQUENCE_LENGTH+core.PREDICTION_HORIZON] for i in range(n)], dtype=int)
-    return TaskBundle(inputs.astype(np.float32), targets.astype(np.float32), y, model_spec.task_type, error_name)
+    metadata = {}
+    if core.TIMESTAMP_COLUMN in data.columns:
+        import pandas as pd
+        from score_postprocessing import detect_timestamp_segments
+
+        timestamps = pd.to_datetime(data[core.TIMESTAMP_COLUMN], errors="raise")
+        row_segments, gap_threshold = detect_timestamp_segments(timestamps)
+        row_segments = np.asarray(row_segments, dtype=np.int64)
+        label_rows = np.arange(n) + core.SEQUENCE_LENGTH + core.PREDICTION_HORIZON
+        # A gap belongs to the later row. Keep every existing window, including
+        # those that cross a recording boundary, and mark it for evaluation.
+        row_gaps = np.r_[False, row_segments[1:] != row_segments[:-1]]
+        gap_prefix = np.r_[0, np.cumsum(row_gaps, dtype=np.int64)]
+        window_end = np.arange(n) + core.SEQUENCE_LENGTH
+        window_gaps = gap_prefix[window_end] > gap_prefix[np.arange(n) + 1]
+        metadata = {
+            "sample_timestamps": timestamps.to_numpy()[label_rows],
+            "segment_ids": row_segments[label_rows],
+            "contains_timestamp_gap": window_gaps,
+            "timestamp_gap_threshold": gap_threshold,
+        }
+    return TaskBundle(inputs.astype(np.float32), targets.astype(np.float32), y,
+                      model_spec.task_type, error_name, **metadata)

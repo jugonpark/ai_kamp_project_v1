@@ -1,4 +1,5 @@
 import inspect
+import csv
 import json
 import shutil
 import uuid
@@ -8,6 +9,60 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 class ArtifactAndTrainingTests(unittest.TestCase):
+    def test_temporal_results_preserve_historical_csv_and_align_columns(self):
+        import model_artifacts
+        folder = Path.cwd() / "outputs" / ".test_artifacts" / uuid.uuid4().hex
+        try:
+            folder.mkdir(parents=True)
+            model_path = folder / "model.keras"
+            run = SimpleNamespace(model_path=model_path)
+            old_path = folder / "evaluation_results.csv"
+            old_bytes = b"f1,fp,fn\r\n0.8,3,4\r\n"
+            old_path.write_bytes(old_bytes)
+            first = model_artifacts.append_evaluation_result(run, {
+                "temporal_method": "NONE", "ewma_alpha": .4, "timestamp_aware": True,
+                "timestamp_gap_threshold": .15, "f1": .8, "fp": 3, "fn": 4,
+                "total_error": 7, "detection_delay_samples": "", "pareto": "",
+            })
+            second = model_artifacts.append_evaluation_result(run, {
+                "temporal_method": "EWMA", "ewma_alpha": .2, "timestamp_aware": True,
+                "timestamp_gap_threshold": .15, "f1": .9, "fp": 2, "fn": 3,
+                "total_error": 5, "detection_delay_samples": 2,
+                "detection_delay_seconds": .2, "pareto": True,
+            })
+            self.assertEqual(first, second)
+            self.assertEqual(first.name, "evaluation_results_v2.csv")
+            self.assertEqual(old_path.read_bytes(), old_bytes)
+            with first.open(newline="", encoding="utf-8-sig") as handle:
+                rows = list(csv.DictReader(handle))
+            self.assertEqual(len(rows), 2)
+            self.assertEqual(rows[0]["temporal_method"], "NONE")
+            self.assertEqual(rows[0]["ewma_alpha"], "")
+            self.assertEqual(rows[1]["ewma_alpha"], "0.2")
+            self.assertEqual(rows[1]["total_error"], "5")
+            self.assertEqual(rows[1]["pareto"], "True")
+            self.assertEqual(first.read_bytes().count(b"\xef\xbb\xbf"), 1)
+        finally:
+            shutil.rmtree(folder, ignore_errors=True)
+
+    def test_legacy_result_with_mismatched_header_does_not_corrupt_csv(self):
+        import model_artifacts
+        folder = Path.cwd() / "outputs" / ".test_artifacts" / uuid.uuid4().hex
+        try:
+            folder.mkdir(parents=True)
+            run = SimpleNamespace(model_path=folder / "model.keras")
+            old_path = folder / "evaluation_results.csv"
+            old_bytes = b"f1\r\n0.8\r\n"
+            old_path.write_bytes(old_bytes)
+            path = model_artifacts.append_evaluation_result(run, {"f1": .9, "fp": 2})
+            self.assertNotEqual(path, old_path)
+            self.assertEqual(old_path.read_bytes(), old_bytes)
+            with path.open(newline="", encoding="utf-8-sig") as handle:
+                row = next(csv.DictReader(handle))
+            self.assertEqual(row["fp"], "2")
+        finally:
+            shutil.rmtree(folder, ignore_errors=True)
+
     def test_legacy_kamp_model_is_discoverable(self):
         from model_artifacts import discover_model_runs
         runs = discover_model_runs("KAMP_LSTM_AE")

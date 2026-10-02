@@ -1,7 +1,7 @@
 """Per-model run storage and discovery, including the legacy KAMP model."""
 from dataclasses import dataclass
 from datetime import datetime
-import json, platform
+import csv, hashlib, json, platform
 from pathlib import Path
 import pandas as pd
 import tensorflow as tf
@@ -10,6 +10,18 @@ import plot_utils
 from model_registry import MODEL_REGISTRY
 
 RUNS_ROOT = core.OUTPUT_DIR / "models"
+
+TEMPORAL_RESULT_FIELDS = (
+    "model", "model_id", "task_type", "error_name", "score_method", "score_name",
+    "threshold_method", "threshold_name", "threshold", "effective_threshold_method",
+    "fallback_used", "fallback_reason", "accuracy", "balanced_accuracy", "precision",
+    "recall", "f1", "specificity", "fpr", "fnr", "tn", "fp", "fn", "tp",
+    "status", "experiment_name", "seed", "optimizer", "learning_rate", "loss",
+    "batch_size", "cnn_filters", "cnn_kernel_size", "bottleneck_units", "noise_std",
+    "best_epoch", "best_val_loss", "training_time", "created_at", "temporal_method",
+    "ewma_alpha", "timestamp_aware", "timestamp_gap_threshold", "total_error",
+    "detection_delay_samples", "detection_delay_seconds", "pareto", "evaluated_at",
+)
 
 @dataclass(frozen=True)
 class ModelRun:
@@ -86,7 +98,33 @@ def save_model_run(model, history, spec, training_info):
 
 def append_evaluation_result(model_run, result):
     """Append one independently calibrated evaluation without overwriting history."""
-    path = model_run.model_path.parent / "evaluation_results.csv"
-    frame = pd.DataFrame([{**result, "evaluated_at": datetime.now().isoformat()}])
-    frame.to_csv(path, mode="a", header=not path.exists(), index=False, encoding="utf-8-sig")
+    row = {**result, "evaluated_at": datetime.now().isoformat()}
+    if "temporal_method" in row:
+        path = model_run.model_path.parent / "evaluation_results_v2.csv"
+        fields = list(TEMPORAL_RESULT_FIELDS)
+        if row["temporal_method"] == "NONE":
+            row["ewma_alpha"] = ""
+    else:
+        path = model_run.model_path.parent / "evaluation_results.csv"
+        fields = list(row)
+    fields.extend(key for key in row if key not in fields)
+    if path.exists():
+        with path.open("r", newline="", encoding="utf-8-sig") as handle:
+            existing_fields = next(csv.reader(handle), [])
+        if set(row).issubset(existing_fields):
+            fields = existing_fields
+        elif existing_fields != fields:
+            # Preserve the historical CSV: an append under a different header shifts columns.
+            signature = hashlib.sha256("\x1f".join(fields).encode("utf-8")).hexdigest()[:12]
+            path = path.with_name(f"{path.stem}_{signature}{path.suffix}")
+            if path.exists():
+                with path.open("r", newline="", encoding="utf-8-sig") as handle:
+                    if next(csv.reader(handle), []) != fields:
+                        raise ValueError(f"Evaluation CSV schema mismatch: {path}")
+    new_file = not path.exists()
+    with path.open("a", newline="", encoding="utf-8-sig" if new_file else "utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fields)
+        if new_file or handle.tell() == 0:
+            writer.writeheader()
+        writer.writerow({key: row.get(key, "") for key in fields})
     return path

@@ -15,6 +15,11 @@ from model_data import create_task_bundle
 from model_artifacts import discover_model_runs
 from anomaly_scoring import SCORE_METHODS, compute_scores, fit_score_calibration
 from threshold_methods import THRESHOLD_METHODS, calculate_threshold
+from score_postprocessing import (TEMPORAL_METHOD_NONE, TEMPORAL_METHOD_EWMA,
+                                  apply_temporal_processing, fp_fn_pareto_flags)
+
+
+EWMA_SWEEP_ALPHAS = (0.02, 0.04, 0.05, 0.10, 0.20, 0.30, 0.40, 0.60, 0.80, 1.00)
 
 
 class EvaluationController:
@@ -75,6 +80,34 @@ class EvaluationController:
         x_test = np.vstack([x_normal[nv:], x_anomaly[av:]])
         target_test = np.vstack([target_normal[nv:], target_anomaly[av:]])
         y_test = np.hstack([y_normal[nv:], y_anomaly[av:]]).astype(int)
+        def evaluation_metadata(normal_slice, anomaly_slice):
+            normal_count = len(normal_slice)
+            anomaly_count = len(anomaly_slice)
+            normal_segments = normal_bundle.segment_ids
+            anomaly_segments = anomaly_bundle.segment_ids
+            if normal_segments is None or anomaly_segments is None:
+                segment_ids = np.r_[np.zeros(normal_count, dtype=int),
+                                    np.ones(anomaly_count, dtype=int)]
+            else:
+                normal_ids = np.asarray(normal_segments[normal_slice], dtype=np.int64)
+                anomaly_ids = np.asarray(anomaly_segments[anomaly_slice], dtype=np.int64)
+                segment_ids = np.r_[normal_ids, anomaly_ids + int(normal_ids.max(initial=-1)) + 1]
+            gaps = None
+            if normal_bundle.contains_timestamp_gap is not None and anomaly_bundle.contains_timestamp_gap is not None:
+                gaps = np.r_[normal_bundle.contains_timestamp_gap[normal_slice],
+                             anomaly_bundle.contains_timestamp_gap[anomaly_slice]]
+            timestamps = None
+            if normal_bundle.sample_timestamps is not None and anomaly_bundle.sample_timestamps is not None:
+                timestamps = np.r_[normal_bundle.sample_timestamps[normal_slice],
+                                   anomaly_bundle.sample_timestamps[anomaly_slice]]
+            stream_ids = np.r_[np.zeros(normal_count, dtype=int),
+                               np.ones(anomaly_count, dtype=int)]
+            return {"segment_ids": segment_ids, "stream_ids": stream_ids,
+                    "contains_timestamp_gap": gaps,
+                    "sample_timestamps": timestamps,
+                    "timestamp_gap_threshold": normal_bundle.timestamp_gap_threshold}
+        valid_metadata = evaluation_metadata(slice(None, nv), slice(None, av))
+        test_metadata = evaluation_metadata(slice(nv, None), slice(av, None))
         model = tf.keras.models.load_model(self.model_path, compile=False)
         expected = (core.SEQUENCE_LENGTH, len(core.FEATURES))
         if tuple(model.input_shape[1:]) != expected:
@@ -94,22 +127,65 @@ class EvaluationController:
         self._bundle = {"x_valid": x_valid, "x_test": x_test,
                         "valid_prediction": valid_prediction, "test_prediction": test_prediction,
                         "valid_error": valid_error, "test_error": test_error,
-                        "y_valid": y_valid, "y_test": y_test, "summary": summary}
+                        "y_valid": y_valid, "y_test": y_test, "summary": summary,
+                        "valid_metadata": valid_metadata, "test_metadata": test_metadata}
         self._prediction_cache[key] = self._bundle
         return {"cache_hit": False, **summary}
 
-    def evaluate(self, score_method: str, threshold_method: str):
+    @staticmethod
+    def _delay(y_test, prediction, metadata):
+        """First detection within an observed anomaly recording; otherwise N/A."""
+        timestamps = metadata.get("sample_timestamps")
+        segments = metadata.get("segment_ids")
+        if timestamps is None or segments is None or not np.any(y_test == 1):
+            return "", ""
+        timestamps = np.asarray(timestamps)
+        segments = np.asarray(segments)
+        for start in np.flatnonzero((y_test == 1) & np.r_[True, (y_test[1:] != y_test[:-1]) | (segments[1:] != segments[:-1])]):
+            end = start + 1
+            while end < len(y_test) and y_test[end] == 1 and segments[end] == segments[start]:
+                end += 1
+            detections = np.flatnonzero(prediction[start:end] == 1)
+            if not len(detections):
+                continue
+            detected = start + int(detections[0])
+            try:
+                seconds = float((timestamps[detected] - timestamps[start]) / np.timedelta64(1, 's'))
+            except (TypeError, ValueError):
+                return "", ""
+            if np.isfinite(seconds) and seconds >= 0:
+                return detected - start, seconds
+        return "", ""
+
+    def evaluate(self, score_method: str, threshold_method: str,
+                 temporal_method: str = TEMPORAL_METHOD_NONE, ewma_alpha: float = 0.4,
+                 timestamp_aware: bool = True):
         if not self._bundle: raise RuntimeError("Load a model before evaluation")
         if score_method not in SCORE_METHODS: raise KeyError(f"Unknown score method: {score_method}")
         if threshold_method not in THRESHOLD_METHODS: raise KeyError(f"Unknown threshold method: {threshold_method}")
+        if temporal_method not in (TEMPORAL_METHOD_NONE, TEMPORAL_METHOD_EWMA):
+            raise ValueError(f"Unknown temporal method: {temporal_method}")
         valid_error, test_error = self._bundle["valid_error"], self._bundle["test_error"]
         y_valid, y_test = self._bundle["y_valid"], self._bundle["y_test"]
         calibration = fit_score_calibration(score_method, valid_error[y_valid == 0])
         valid_scores = compute_scores(score_method, valid_error, calibration)
         test_scores = compute_scores(score_method, test_error, calibration)
+        if temporal_method != TEMPORAL_METHOD_NONE:
+            valid_meta = self._bundle.get("valid_metadata", {})
+            test_meta = self._bundle.get("test_metadata", {})
+            valid_scores = apply_temporal_processing(
+                valid_scores, temporal_method, ewma_alpha,
+                valid_meta.get("segment_ids") if timestamp_aware else valid_meta.get("stream_ids"),
+                valid_meta.get("contains_timestamp_gap") if timestamp_aware else None)
+            test_scores = apply_temporal_processing(
+                test_scores, temporal_method, ewma_alpha,
+                test_meta.get("segment_ids") if timestamp_aware else test_meta.get("stream_ids"),
+                test_meta.get("contains_timestamp_gap") if timestamp_aware else None)
         threshold_result = calculate_threshold(threshold_method, valid_scores, y_valid)
         prediction = (test_scores > threshold_result.threshold).astype(int)
         tn, fp, fn, tp = confusion_matrix(y_test, prediction, labels=[0, 1]).ravel()
+        delay_samples, delay_seconds = self._delay(y_test, prediction, self._bundle.get("test_metadata", {}))
+        gap_threshold = self._bundle.get("test_metadata", {}).get("timestamp_gap_threshold")
         result = {
             "model": self.model_spec.display_name, "model_id":self.model_id, "task_type":self.model_spec.task_type,
             "error_name": "Prediction Error" if self.model_spec.task_type == "FORECAST" else "Reconstruction Error", "score_method": score_method,
@@ -129,6 +205,12 @@ class EvaluationController:
             "fpr": float(fp / (tn + fp)) if tn + fp else 0.0,
             "fnr": float(fn / (fn + tp)) if fn + tp else 0.0,
             "tn": int(tn), "fp": int(fp), "fn": int(fn), "tp": int(tp),
+            "total_error": int(fp + fn), "temporal_method": temporal_method,
+            "ewma_alpha": float(ewma_alpha) if temporal_method == TEMPORAL_METHOD_EWMA else "",
+            "timestamp_aware": bool(timestamp_aware),
+            "timestamp_gap_threshold": gap_threshold if gap_threshold is not None else "",
+            "detection_delay_samples": delay_samples,
+            "detection_delay_seconds": delay_seconds, "pareto": "",
         }
         metadata = getattr(getattr(self, "model_run", None), "metadata", {})
         result.update({
@@ -145,13 +227,35 @@ class EvaluationController:
         })
         return result
 
-    def compare_all(self, progress=None):
+    def compare_all(self, progress=None, temporal_method=TEMPORAL_METHOD_NONE,
+                    ewma_alpha=0.4, timestamp_aware=True):
         total = len(SCORE_METHODS) * len(THRESHOLD_METHODS)
         results = []
         for score_id in SCORE_METHODS:
             for threshold_id in THRESHOLD_METHODS:
-                results.append(self.evaluate(score_id, threshold_id))
+                results.append(self.evaluate(score_id, threshold_id, temporal_method,
+                                             ewma_alpha, timestamp_aware))
                 if progress: progress(len(results), total)
+        return results
+
+    def sweep_ewma_alphas(self, score_method, threshold_method,
+                          timestamp_aware=True, progress=None):
+        candidates = [(TEMPORAL_METHOD_NONE, 0.4)] + [
+            (TEMPORAL_METHOD_EWMA, alpha) for alpha in EWMA_SWEEP_ALPHAS]
+        results = []
+        for method, alpha in candidates:
+            results.append(self.evaluate(score_method, threshold_method,
+                                         method, alpha, timestamp_aware))
+            if progress:
+                progress(len(results), len(candidates))
+        flags = fp_fn_pareto_flags([row["fp"] for row in results],
+                                   [row["fn"] for row in results])
+        baseline = results[0]
+        for row, flag in zip(results, flags):
+            row["pareto"] = bool(flag)
+            row["delta_fp"] = row["fp"] - baseline["fp"]
+            row["delta_fn"] = row["fn"] - baseline["fn"]
+            row["delta_total_error"] = row["total_error"] - baseline["total_error"]
         return results
 
     @classmethod
