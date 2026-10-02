@@ -48,7 +48,8 @@ class EvaluationWorker(QObject):
             elif self.action == "compare_models":
                 self.status_changed.emit("COMPARING MODELS")
                 self.comparison_ready.emit(self.controller.compare_models(self.score_method, self.threshold_method,
-                    lambda done, total: self.log_message.emit(f"Compare Models: {done}/{total}")))
+                    lambda done, total: self.log_message.emit(f"Compare Models: {done}/{total}"),
+                    self.temporal_method, self.ewma_alpha, self.timestamp_aware))
             else:
                 raise ValueError(f"Unknown evaluation action: {self.action}")
         except Exception as exc:

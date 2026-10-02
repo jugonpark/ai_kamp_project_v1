@@ -1,12 +1,47 @@
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import numpy as np
+import pandas as pd
 
 
 class EvaluationControllerTests(unittest.TestCase):
+    def test_real_task_bundle_metadata_is_split_during_model_load(self):
+        from evaluation_controller import EvaluationController
+        import train_lstm_ae as core
+
+        rows = 130
+        timestamps = pd.Timestamp("2026-01-01") + pd.to_timedelta(np.arange(rows) / 10, unit="s")
+        frame = pd.DataFrame({
+            **{name: np.arange(rows, dtype=float) for name in core.FEATURES},
+            core.LABEL_COLUMN: np.zeros(rows, dtype=int),
+            core.TIMESTAMP_COLUMN: timestamps,
+        })
+        predict = Mock(side_effect=lambda values, verbose=0: values.copy())
+        model = SimpleNamespace(input_shape=(None, core.SEQUENCE_LENGTH, len(core.FEATURES)),
+                                predict=predict)
+        controller = EvaluationController("model.keras", "normal.csv", "anomaly.csv")
+        with patch.object(controller, "cache_key", return_value=("metadata-split-test",)), \
+             patch("evaluation_controller.core.load_data", return_value=frame), \
+             patch("evaluation_controller.core.validate_data", side_effect=lambda data, *_: data.copy()), \
+             patch("evaluation_controller.core.KAMP_TRAIN_ROWS", 0), \
+             patch("evaluation_controller.core.KAMP_VALID_NORMAL_SEQUENCES", 2), \
+             patch("evaluation_controller.core.KAMP_VALID_ANOMALY_SEQUENCES", 2), \
+             patch("evaluation_controller.core.fit_scaler", return_value=None), \
+             patch("evaluation_controller.core.transform_features", side_effect=lambda data, *_: data), \
+             patch("evaluation_controller.tf.keras.models.load_model", return_value=model):
+            summary = controller.load_model_and_predictions(force=True)
+        self.assertEqual(summary["valid_samples"], 4)
+        self.assertEqual(summary["test_samples"], 16)
+        self.assertEqual(len(controller._bundle["valid_metadata"]["segment_ids"]), 4)
+        self.assertEqual(len(controller._bundle["test_metadata"]["segment_ids"]), 16)
+        self.assertEqual(predict.call_count, 2)
+        controller.evaluate("LAST_STEP_MSE", "NORMAL_P99", "EWMA", 0.2)
+        controller.evaluate("LAST_STEP_MSE", "NORMAL_P99", "EWMA", 0.4)
+        self.assertEqual(predict.call_count, 2)
+
     def test_controller_can_be_constructed_without_loading_model(self):
         from evaluation_controller import EvaluationController
         controller = EvaluationController()
@@ -140,6 +175,43 @@ class EvaluationControllerTests(unittest.TestCase):
             controller.evaluate("LAST_STEP_MSE", "NORMAL_P99", "EWMA", .5, False)
         np.testing.assert_allclose(captured[0], [1., 3., 10., 11.])
         np.testing.assert_allclose(captured[1], [1., 2., 10., 11.])
+
+    def test_delay_requires_observed_onset_in_same_stream(self):
+        from evaluation_controller import EvaluationController
+        timestamps = np.array(["2026-01-01T00:00:00.0", "2026-01-01T00:00:00.1",
+                               "2026-01-01T00:00:00.2"], dtype="datetime64[ms]")
+        labels = np.array([0, 1, 1])
+        prediction = np.array([0, 0, 1])
+        metadata = {"sample_timestamps": timestamps,
+                    "segment_ids": np.array([0, 0, 0]),
+                    "stream_ids": np.array([0, 0, 0])}
+        self.assertEqual(EvaluationController._delay(labels, prediction, metadata), (1, 0.1))
+        metadata["stream_ids"] = np.array([0, 1, 1])
+        self.assertEqual(EvaluationController._delay(labels, prediction, metadata), ("", ""))
+        self.assertEqual(EvaluationController._delay(np.ones(3, dtype=int), prediction, metadata), ("", ""))
+
+    def test_compare_models_forwards_temporal_settings(self):
+        from evaluation_controller import EvaluationController
+        fake_run = SimpleNamespace(model_path="fake.keras", model_id="KAMP_LSTM_AE", metadata={})
+        with patch("evaluation_controller.MODEL_REGISTRY", {"KAMP_LSTM_AE": EvaluationController().model_spec}), \
+             patch("evaluation_controller.discover_model_runs", return_value=[fake_run]), \
+             patch.object(EvaluationController, "load_model_and_predictions"), \
+             patch.object(EvaluationController, "evaluate", return_value={}) as evaluate:
+            self.assertEqual(len(EvaluationController.compare_models(
+                "LAST_STEP_MSE", "NORMAL_P99", temporal_method="EWMA",
+                ewma_alpha=0.2, timestamp_aware=False)), 1)
+        evaluate.assert_called_once_with("LAST_STEP_MSE", "NORMAL_P99", "EWMA", 0.2, False)
+
+    def test_compare_all_remains_48_with_one_temporal_setting(self):
+        from evaluation_controller import EvaluationController
+        controller = EvaluationController()
+        with patch.object(controller, "evaluate", return_value={}) as evaluate:
+            results = controller.compare_all(temporal_method="EWMA", ewma_alpha=0.2,
+                                             timestamp_aware=False)
+        self.assertEqual(len(results), 48)
+        self.assertEqual(evaluate.call_count, 48)
+        self.assertTrue(all(call.args[2:] == ("EWMA", 0.2, False)
+                            for call in evaluate.call_args_list))
 
 
 if __name__ == "__main__": unittest.main()

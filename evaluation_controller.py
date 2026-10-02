@@ -81,8 +81,8 @@ class EvaluationController:
         target_test = np.vstack([target_normal[nv:], target_anomaly[av:]])
         y_test = np.hstack([y_normal[nv:], y_anomaly[av:]]).astype(int)
         def evaluation_metadata(normal_slice, anomaly_slice):
-            normal_count = len(normal_slice)
-            anomaly_count = len(anomaly_slice)
+            normal_count = len(normal_bundle.inputs[normal_slice])
+            anomaly_count = len(anomaly_bundle.inputs[anomaly_slice])
             normal_segments = normal_bundle.segment_ids
             anomaly_segments = anomaly_bundle.segment_ids
             if normal_segments is None or anomaly_segments is None:
@@ -134,14 +134,21 @@ class EvaluationController:
 
     @staticmethod
     def _delay(y_test, prediction, metadata):
-        """First detection within an observed anomaly recording; otherwise N/A."""
+        """Measure delay only when onset is observed in one continuous stream."""
         timestamps = metadata.get("sample_timestamps")
         segments = metadata.get("segment_ids")
+        streams = metadata.get("stream_ids")
         if timestamps is None or segments is None or not np.any(y_test == 1):
             return "", ""
         timestamps = np.asarray(timestamps)
         segments = np.asarray(segments)
-        for start in np.flatnonzero((y_test == 1) & np.r_[True, (y_test[1:] != y_test[:-1]) | (segments[1:] != segments[:-1])]):
+        streams = np.asarray(streams) if streams is not None else None
+        # The first test anomaly window is a suffix of its recording. A new
+        # segment alone does not establish the true anomaly onset.
+        onset = (y_test[1:] == 1) & (y_test[:-1] == 0) & (segments[1:] == segments[:-1])
+        if streams is not None:
+            onset &= streams[1:] == streams[:-1]
+        for start in np.flatnonzero(onset) + 1:
             end = start + 1
             while end < len(y_test) and y_test[end] == 1 and segments[end] == segments[start]:
                 end += 1
@@ -259,7 +266,9 @@ class EvaluationController:
         return results
 
     @classmethod
-    def compare_models(cls, score_method, threshold_method, progress=None):
+    def compare_models(cls, score_method, threshold_method, progress=None,
+                       temporal_method=TEMPORAL_METHOD_NONE, ewma_alpha=0.4,
+                       timestamp_aware=True):
         results = []
         model_ids = list(MODEL_REGISTRY)
         for model_id in model_ids:
@@ -269,6 +278,9 @@ class EvaluationController:
             if not runs: continue
             controller = cls(model_path=runs[0].model_path, model_id=model_id)
             controller.model_run = runs[0]
-            controller.load_model_and_predictions(); results.append(controller.evaluate(score_method, threshold_method))
+            controller.load_model_and_predictions()
+            results.append(controller.evaluate(score_method, threshold_method,
+                                               temporal_method, ewma_alpha,
+                                               timestamp_aware))
             if progress: progress(len(results), len(model_ids))
         return results

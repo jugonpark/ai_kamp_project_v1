@@ -77,6 +77,7 @@ class EvaluationWorkerTests(unittest.TestCase):
         controller = Mock()
         controller.evaluate.return_value = {}
         controller.compare_all.return_value = []
+        controller.compare_models.return_value = []
         controller.sweep_ewma_alphas.return_value = []
         EvaluationWorker(controller, "evaluate", "LAST_STEP_MSE", "POT_1PCT", "EWMA", 0.2, False).run()
         controller.evaluate.assert_called_once_with("LAST_STEP_MSE", "POT_1PCT", "EWMA", 0.2, False)
@@ -87,3 +88,7 @@ class EvaluationWorkerTests(unittest.TestCase):
         EvaluationWorker(controller, "sweep_ewma", "LAST_STEP_MSE", "POT_1PCT", "EWMA", 0.2, False).run()
         args = controller.sweep_ewma_alphas.call_args.args
         self.assertEqual(args[:3], ("LAST_STEP_MSE", "POT_1PCT", False))
+        EvaluationWorker(controller, "compare_models", "LAST_STEP_MSE", "POT_1PCT", "EWMA", 0.2, False).run()
+        args = controller.compare_models.call_args.args
+        self.assertTrue(callable(args[2]))
+        self.assertEqual(args[3:], ("EWMA", 0.2, False))
