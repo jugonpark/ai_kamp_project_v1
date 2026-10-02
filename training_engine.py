@@ -26,6 +26,12 @@ def build_loss(config):
     return tf.keras.losses.Huber(delta=config["huber_delta"]) if config["loss"] == "Huber" else "mse"
 
 
+def build_training_model(spec, config):
+    if spec.id in {"CNN_LSTM_AUTOENCODER", "DENOISING_CNN_LSTM_AUTOENCODER"}:
+        return spec.builder(kernel_size=config["cnn_kernel_size"])
+    return spec.builder()
+
+
 class GUITrainingCallback(QObject, tf.keras.callbacks.Callback):
     """Emit plain data through Qt signals; never touch widgets from TensorFlow."""
 
@@ -142,7 +148,7 @@ class TrainingWorker(QObject):
             self._log(f"X_train created: {x_train.shape}")
             self.status_changed.emit("BUILDING MODEL")
             self._log(f"Selected Model: {spec.display_name} | Task: {spec.task_type} | Sequence: {core.SEQUENCE_LENGTH} | Horizon: {core.PREDICTION_HORIZON}")
-            model = spec.builder()
+            model = build_training_model(spec, self.config)
             optimizer = build_optimizer(self.config)
             loss = build_loss(self.config)
             model.compile(optimizer=optimizer, loss=loss)

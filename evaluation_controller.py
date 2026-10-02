@@ -136,6 +136,7 @@ class EvaluationController:
             "experiment_name": metadata.get("experiment_name", ""), "seed": metadata.get("random_seed", ""),
             "optimizer": metadata.get("optimizer", ""), "learning_rate": metadata.get("learning_rate", ""),
             "loss": metadata.get("loss", ""), "batch_size": metadata.get("batch_size", ""),
+            "cnn_kernel_size": metadata.get("cnn_kernel_size", "unknown"),
             "noise_std": metadata.get("noise_std", ""), "best_epoch": metadata.get("best_epoch", ""),
             "best_val_loss": metadata.get("best_val_loss", ""),
             "training_time": metadata.get("training_duration_seconds", ""), "created_at": metadata.get("created_at", ""),

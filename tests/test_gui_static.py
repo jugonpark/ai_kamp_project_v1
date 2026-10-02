@@ -41,7 +41,7 @@ class EvaluationGuiTests(unittest.TestCase):
                     "early_stopping_enabled","early_stopping_patience","early_stopping_min_delta",
                     "restore_best_weights","noise_type","noise_mean","noise_std","noise_clip"}
         self.assertTrue(required.issubset(config))
-        self.assertEqual(window.comparison_table.columnCount(), 25)
+        self.assertEqual(window.comparison_table.columnCount(), 26)
         self.assertEqual(set(window.history_filters), {"Model","Status","Score","Threshold","Loss","Seed"})
         window.close()
 
@@ -170,11 +170,69 @@ class EvaluationGuiTests(unittest.TestCase):
     def test_every_training_parameter_has_help_and_launcher_exists(self):
         from gui_app import MainWindow
         window = MainWindow()
-        self.assertEqual(len(window.parameter_help_buttons), 21)
+        self.assertEqual(len(window.parameter_help_buttons), 22)
         window.show_parameter_guide("Learning Rate")
         self.assertIn("현재 값: 0.001", window.parameter_guide.text())
         self.assertTrue((Path.cwd() / "run_gui.bat").is_file())
         window.close()
+
+    def test_cnn_kernel_selector_preview_preset_and_legacy_history(self):
+        from gui_app import MainWindow
+        window = MainWindow(); window.show(); self.app.processEvents()
+        self.assertEqual([window.cnn_kernel_combo.itemData(i) for i in range(window.cnn_kernel_combo.count())], [3, 5, 7])
+        self.assertTrue(window.model_structure_box.isVisible())
+        self.assertEqual(window._training_config_dict()["cnn_kernel_size"], 3)
+        baseline_params = window.params_label.text()
+        window.cnn_kernel_combo.setCurrentIndex(window.cnn_kernel_combo.findData(5))
+        self.assertEqual(window._training_config_dict()["cnn_kernel_size"], 5)
+        self.assertIn("CNN Kernel 5", window.current_experiment_summary.text())
+        self.assertIn("k=5", window.architecture_label.text())
+        self.assertNotEqual(window.params_label.text(), baseline_params)
+        window.show_parameter_guide("CNN Kernel Size")
+        self.assertIn("현재 값: 5", window.parameter_guide.text())
+        window.preset_combo.setCurrentIndex(window.preset_combo.findData("CNN-LSTM KERNEL 5"))
+        self.assertEqual(window.cnn_kernel_combo.currentData(), 5)
+        window.reset_training_config()
+        self.assertEqual(window.cnn_kernel_combo.currentData(), 3)
+        window.training_model_combo.setCurrentIndex(window.training_model_combo.findData("DENOISING_CNN_LSTM_AUTOENCODER"))
+        self.assertTrue(window.model_structure_box.isVisible())
+        window.cnn_kernel_combo.setCurrentIndex(window.cnn_kernel_combo.findData(7))
+        self.assertIn("k=7", window.architecture_label.text())
+        window._set_training_locked(True)
+        self.assertFalse(window.cnn_kernel_combo.isEnabled())
+        self.assertTrue(window.parameter_help_buttons["CNN Kernel Size"].isEnabled())
+        window._set_training_locked(False)
+        result = {"model": "CNN", "model_id": "CNN_LSTM_AUTOENCODER", "experiment_name": "old",
+                  "score_method": "LAST_STEP_MSE", "threshold_method": "PR_INTERSECTION"}
+        window._append_comparison(result)
+        self.assertEqual(window.comparison_table.item(0, 3).text(), "unknown")
+        window.close()
+
+    def test_cnn_kernel_config_round_trip_and_legacy_default(self):
+        from gui_app import MainWindow
+        from training_config import save_training_config
+        window = MainWindow()
+        folder = Path.cwd() / "outputs" / ".test_artifacts" / uuid.uuid4().hex
+        try:
+            window.cnn_kernel_combo.setCurrentIndex(window.cnn_kernel_combo.findData(5))
+            path = save_training_config(folder / "kernel.json", window._training_config_dict())
+            window.reset_training_config()
+            with patch("gui_app.QFileDialog.getOpenFileName", return_value=(str(path), "JSON (*.json)")):
+                window.load_training_config()
+            self.assertEqual(window.cnn_kernel_combo.currentData(), 5)
+            self.assertIn("k=5", window.architecture_label.text())
+            legacy = window._training_config_dict()
+            legacy.pop("cnn_kernel_size")
+            import json
+            legacy_path = folder / "legacy.json"
+            legacy_path.write_text(json.dumps(legacy), encoding="utf-8")
+            window.cnn_kernel_combo.setCurrentIndex(window.cnn_kernel_combo.findData(7))
+            with patch("gui_app.QFileDialog.getOpenFileName", return_value=(str(legacy_path), "JSON (*.json)")):
+                window.load_training_config()
+            self.assertEqual(window.cnn_kernel_combo.currentData(), 3)
+        finally:
+            shutil.rmtree(folder, ignore_errors=True)
+            window.close()
 
     def test_preset_and_config_load_update_actual_widgets(self):
         from gui_app import MainWindow

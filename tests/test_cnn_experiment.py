@@ -2,6 +2,24 @@ import unittest
 import numpy as np
 
 class CnnExperimentTests(unittest.TestCase):
+    def test_cnn_and_denoising_builders_use_selected_kernel_twice(self):
+        from tensorflow.keras.layers import Conv1D
+        from model_registry import MODEL_REGISTRY
+        from training_engine import build_training_model
+        for model_id in ("CNN_LSTM_AUTOENCODER", "DENOISING_CNN_LSTM_AUTOENCODER"):
+            for kernel in (3, 5, 7):
+                with self.subTest(model_id=model_id, kernel=kernel):
+                    model = build_training_model(MODEL_REGISTRY[model_id], {"cnn_kernel_size": kernel})
+                    self.assertEqual([layer.kernel_size for layer in model.layers if isinstance(layer, Conv1D)], [(kernel,), (kernel,)])
+
+    def test_non_cnn_builder_keeps_zero_argument_call(self):
+        from types import SimpleNamespace
+        from training_engine import build_training_model
+        calls = []
+        spec = SimpleNamespace(id="KAMP_LSTM_AE", builder=lambda: calls.append("called"))
+        build_training_model(spec, {"cnn_kernel_size": 5})
+        self.assertEqual(calls, ["called"])
+
     def test_active_training_registry_contains_only_two_models(self):
         from model_registry import MODEL_REGISTRY
         self.assertEqual([m.id for m in MODEL_REGISTRY.values() if m.status == "ACTIVE"], ["CNN_LSTM_AUTOENCODER", "DENOISING_CNN_LSTM_AUTOENCODER"])

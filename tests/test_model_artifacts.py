@@ -31,7 +31,7 @@ class ArtifactAndTrainingTests(unittest.TestCase):
                 "reduce_lr_enabled":True,"reduce_lr_factor":.6,"reduce_lr_patience":3,"min_lr":1e-6,
                 "early_stopping_enabled":True,"early_stopping_patience":5,"early_stopping_min_delta":1e-5,
                 "restore_best_weights":True,"noise_type":"Gaussian","noise_mean":0,"noise_std":.01,
-                "noise_clip":True,"training_duration_seconds":1.25}
+                "noise_clip":True,"training_duration_seconds":1.25,"cnn_kernel_size":5}
         folder = Path.cwd() / "outputs" / ".test_artifacts" / uuid.uuid4().hex
         try:
           with patch.object(model_artifacts, "RUNS_ROOT", folder):
@@ -44,6 +44,9 @@ class ArtifactAndTrainingTests(unittest.TestCase):
             self.assertEqual(metadata["training_duration_seconds"], 1.25)
             self.assertEqual(metadata["noise_generation"], "dynamic_per_batch")
             self.assertEqual(metadata["noise_std"], .01)
+            self.assertEqual(metadata["cnn_kernel_size"], 5)
+            summary = json.loads((run.model_path.parent / "experiment_summary.json").read_text(encoding="utf-8"))
+            self.assertEqual(summary["cnn_kernel_size"], 5)
             path = model_artifacts.append_evaluation_result(run, {"f1":.9})
             self.assertTrue(path.is_file())
         finally:
@@ -76,6 +79,21 @@ class ArtifactAndTrainingTests(unittest.TestCase):
                     {"requested_epochs":2, "monitor_best_epoch":1, "monitor_best_val_loss":.3})
             self.assertEqual(run.metadata["best_epoch"], 1)
             self.assertEqual(run.metadata["best_val_loss"], .3)
+        finally:
+            shutil.rmtree(folder, ignore_errors=True)
+
+    def test_historical_run_without_kernel_metadata_is_unknown(self):
+        import model_artifacts
+        folder = Path.cwd() / "outputs" / ".test_artifacts" / uuid.uuid4().hex
+        run_dir = folder / "CNN_LSTM_AUTOENCODER" / "old_run"
+        try:
+            run_dir.mkdir(parents=True)
+            (run_dir / "model.keras").write_bytes(b"saved model")
+            (run_dir / "metadata.json").write_text('{"model_id":"CNN_LSTM_AUTOENCODER"}', encoding="utf-8")
+            with patch.object(model_artifacts, "RUNS_ROOT", folder):
+                run = model_artifacts.discover_model_runs("CNN_LSTM_AUTOENCODER")[0]
+            self.assertEqual(run.metadata["cnn_kernel_size"], "unknown")
+            self.assertEqual(run.model_path, run_dir / "model.keras")
         finally:
             shutil.rmtree(folder, ignore_errors=True)
 

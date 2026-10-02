@@ -4,6 +4,7 @@ import platform
 import sys
 import csv
 import json
+import math
 from datetime import datetime
 from pathlib import Path
 
@@ -148,7 +149,7 @@ class MainWindow(QMainWindow):
         self.denoising_box = QGroupBox("노이즈 제거 학습 설정"); denoising_form = QFormLayout(self.denoising_box)
         preset_box = QGroupBox("실험 프리셋"); preset_form = QFormLayout(preset_box)
         self.preset_combo = QComboBox()
-        for display, preset_id in (("CNN-LSTM 기준", "CNN-LSTM BASELINE"), ("CNN-LSTM 보수적", "CNN-LSTM CONSERVATIVE"),
+        for display, preset_id in (("CNN-LSTM 기준", "CNN-LSTM BASELINE"), ("CNN-LSTM 커널 5", "CNN-LSTM KERNEL 5"), ("CNN-LSTM 보수적", "CNN-LSTM CONSERVATIVE"),
                                    ("Denoising 기본", "DENOISING DEFAULT"), ("Denoising 약하게 0.005", "DENOISING WEAK 0.005"), ("사용자 설정", "CUSTOM")):
             self.preset_combo.addItem(display, preset_id)
         self.preset_combo.currentIndexChanged.connect(lambda: self.apply_preset(self.preset_combo.currentData()))
@@ -159,6 +160,10 @@ class MainWindow(QMainWindow):
         self.optimizer_combo = QComboBox(); self.optimizer_combo.addItems(["Adam", "AdamW", "RMSprop"]); self.optimizer_combo.setToolTip("가중치 업데이트 방법입니다.")
         self.loss_combo = QComboBox(); self.loss_combo.addItems(["MSE", "Huber"]); self.loss_combo.setToolTip("MSE는 큰 오차를 강조하고 Huber는 큰 오차에 덜 민감합니다.")
         self.seed_spin = QSpinBox(); self.seed_spin.setRange(0, 999999); self.seed_spin.setValue(42); self.seed_spin.setToolTip("실험 재현을 위한 난수 시작값입니다.")
+        self.model_structure_box = QGroupBox("모델 구조 설정"); structure_form = QFormLayout(self.model_structure_box)
+        self.cnn_kernel_combo = QComboBox()
+        for size in (3, 5, 7): self.cnn_kernel_combo.addItem(str(size), size)
+        self.cnn_kernel_combo.setToolTip("Conv1D가 함께 보는 연속 시점 수입니다.")
         self.noise_std_spin = QDoubleSpinBox(); self.noise_std_spin.setDecimals(4); self.noise_std_spin.setRange(0, .1); self.noise_std_spin.setSingleStep(.005); self.noise_std_spin.setValue(.01); self.noise_std_spin.setToolTip("Denoising 입력에 더할 Gaussian 노이즈의 강도입니다."); self.noise_std_spin.setEnabled(False)
         self.huber_delta_spin = QDoubleSpinBox(); self.huber_delta_spin.setRange(.000001, 1000); self.huber_delta_spin.setValue(1.0)
         self.weight_decay_spin = QDoubleSpinBox(); self.weight_decay_spin.setDecimals(6); self.weight_decay_spin.setRange(0, 1); self.weight_decay_spin.setValue(.0001)
@@ -183,6 +188,7 @@ class MainWindow(QMainWindow):
         self.parameter_help_buttons = {}
         for label, widget, guide in (("실험 이름",self.experiment_name_edit,"Experiment Name"),("최대 에포크",self.epochs_spin,"Epoch"),("배치 크기 (Batch Size)",self.batch_spin,"Batch Size"),("학습률 (Learning Rate)",self.learning_rate_spin,"Learning Rate"),("최적화 알고리즘 (Optimizer)",self.optimizer_combo,"Optimizer"),("가중치 감쇠",self.weight_decay_spin,"Weight Decay"),("손실 함수 (Loss)",self.loss_combo,"Loss"),("Huber 기준값",self.huber_delta_spin,"Huber Delta"),("랜덤 시드 (Random Seed)",self.seed_spin,"Random Seed")):
             self._add_guided_row(training_form, label, widget, guide)
+        self._add_guided_row(structure_form, "CNN 커널 크기", self.cnn_kernel_combo, "CNN Kernel Size")
         for label, widget, guide in (("학습률 자동 감소",self.reduce_lr_enabled,"ReduceLR Enabled"),("학습률 감소 비율",self.reduce_lr_factor_spin,"ReduceLR Factor"),("학습률 감소 대기 에포크",self.reduce_lr_patience_spin,"ReduceLR Patience"),("최소 학습률",self.min_lr_spin,"Minimum LR"),("조기 종료",self.early_stopping_enabled,"EarlyStopping Enabled"),("조기 종료 대기 에포크",self.early_stopping_patience_spin,"EarlyStopping Patience"),("최소 개선량",self.early_stopping_min_delta_spin,"EarlyStopping Min Delta"),("최적 가중치 복원",self.restore_best_weights,"Restore Best Weights")):
             self._add_guided_row(callback_form, label, widget, guide)
         for label, widget, guide in (("노이즈 종류",self.noise_type_combo,"Noise Type"),("노이즈 평균",self.noise_mean_spin,"Noise Mean"),("노이즈 표준편차",self.noise_std_spin,"Noise Std"),("노이즈 적용 후 범위 제한",self.noise_clip_check,"Noise Clip")):
@@ -199,7 +205,7 @@ class MainWindow(QMainWindow):
         self.architecture_label = QLabel(); self.architecture_label.setWordWrap(True)
         self.params_label = QLabel("파라미터 수: -")
         for label in (self.training_model_description, self.architecture_label, self.params_label): architecture_layout.addWidget(label)
-        for box in (training_box, callback_box, self.denoising_box, preset_box, guide_box, architecture_box): settings_layout.addWidget(box)
+        for box in (training_box, self.model_structure_box, callback_box, self.denoising_box, preset_box, guide_box, architecture_box): settings_layout.addWidget(box)
         settings_layout.addStretch()
         self.training_form = training_form
         self.optimizer_combo.currentTextChanged.connect(self._update_optimizer_loss_controls)
@@ -208,7 +214,7 @@ class MainWindow(QMainWindow):
         self.early_stopping_enabled.toggled.connect(self._update_callback_controls)
         self._update_optimizer_loss_controls()
         self._applying_preset = False
-        editable = [self.epochs_spin, self.batch_spin, self.learning_rate_spin, self.optimizer_combo, self.weight_decay_spin,
+        editable = [self.cnn_kernel_combo, self.epochs_spin, self.batch_spin, self.learning_rate_spin, self.optimizer_combo, self.weight_decay_spin,
                     self.loss_combo, self.huber_delta_spin, self.seed_spin, self.reduce_lr_enabled, self.reduce_lr_factor_spin,
                     self.reduce_lr_patience_spin, self.min_lr_spin, self.early_stopping_enabled,
                     self.early_stopping_patience_spin, self.early_stopping_min_delta_spin, self.restore_best_weights,
@@ -228,6 +234,7 @@ class MainWindow(QMainWindow):
                                            self.reset_config_button, self.load_config_button]
         self.experiment_name_edit.textChanged.connect(self._update_experiment_summary)
         self.preset_combo.currentTextChanged.connect(self._update_experiment_summary)
+        self.cnn_kernel_combo.currentIndexChanged.connect(self.update_training_model)
         self.show_parameter_guide("Learning Rate")
         self._update_callback_controls(); self._update_model_dependent_controls()
         self.current_experiment_summary = QLabel(); self.current_experiment_summary.setWordWrap(True)
@@ -297,7 +304,7 @@ class MainWindow(QMainWindow):
             combo = QComboBox(); combo.addItem("전체", "ALL"); combo.currentIndexChanged.connect(self.apply_history_filters); self.history_filters[name] = combo
             filter_layout.addWidget(QLabel({"Model":"모델", "Status":"상태", "Score":"점수", "Threshold":"임계값 방식", "Loss":"손실 함수", "Seed":"시드"}[name])); filter_layout.addWidget(combo)
         history_layout.addLayout(filter_layout)
-        columns = ["상태", "모델", "실험", "시드", "최적화", "학습률", "손실 함수", "배치", "노이즈 표준편차", "점수", "임계값 방식", "임계값", "정확도", "균형 정확도", "정밀도", "재현율", "F1", "정상 정확 판정 (TN)", "오경보 (FP)", "미탐 (FN)", "이상 정확 탐지 (TP)", "최적 에포크", "최적 검증 손실", "학습 시간", "생성 시각"]
+        columns = ["상태", "모델", "실험", "Kernel", "시드", "최적화", "학습률", "손실 함수", "배치", "노이즈 표준편차", "점수", "임계값 방식", "임계값", "정확도", "균형 정확도", "정밀도", "재현율", "F1", "정상 정확 판정 (TN)", "오경보 (FP)", "미탐 (FN)", "이상 정확 탐지 (TP)", "최적 에포크", "최적 검증 손실", "학습 시간", "생성 시각"]
         self.comparison_table = QTableWidget(0, len(columns)); self.comparison_table.setHorizontalHeaderLabels(columns)
         history_layout.addWidget(self.comparison_table); eval_layout.addWidget(history_box, 1)
         self.lock_evaluation_method = QCheckBox("동일 조건 비교: 점수·임계값 방식 잠금"); self.lock_evaluation_method.toggled.connect(lambda locked: (self.score_combo.setEnabled(not locked), self.threshold_combo.setEnabled(not locked))); eval_layout.addWidget(self.lock_evaluation_method)
@@ -372,14 +379,19 @@ class MainWindow(QMainWindow):
     def update_training_model(self):
         spec = MODEL_REGISTRY[self.training_model_combo.currentData()]
         self.training_model_description.setText(f"{spec.display_name}\n과제: {'예측' if spec.task_type == 'FORECAST' else '정상 패턴 복원'}\n입력: 20 × 3{' + Gaussian 노이즈' if spec.denoising else ''}\n출력: {spec.forecast_length or 20} × 3\n\n{spec.description}")
-        self.architecture_label.setText(spec.architecture)
-        model = spec.builder(); self.params_label.setText(f"전체 파라미터 수: {model.count_params()}")
+        cnn = spec.id in {"CNN_LSTM_AUTOENCODER", "DENOISING_CNN_LSTM_AUTOENCODER"}
+        kernel_size = self.cnn_kernel_combo.currentData() if cnn else None
+        architecture = spec.architecture.replace("Conv1D32 × 2", f"Conv1D 32, k={kernel_size} × 2") if cnn else spec.architecture
+        self.architecture_label.setText(architecture)
+        model = spec.builder(kernel_size=kernel_size) if cnn else spec.builder()
+        self.params_label.setText(f"전체 파라미터 수: {model.count_params()}")
         if self.thread is None or not self.thread.isRunning():
             self.status_label.setText(f"선택한 모델: {spec.display_name}    상태: 준비")
         self._update_experiment_summary()
 
     def _update_model_dependent_controls(self, *_):
         denoising = self.training_model_combo.currentData() == "DENOISING_CNN_LSTM_AUTOENCODER"
+        self.model_structure_box.setVisible(self.training_model_combo.currentData() in {"CNN_LSTM_AUTOENCODER", "DENOISING_CNN_LSTM_AUTOENCODER"})
         self.denoising_box.setVisible(denoising)
         self.noise_std_spin.setEnabled(denoising)
         self._update_experiment_summary()
@@ -395,7 +407,7 @@ class MainWindow(QMainWindow):
             f"현재 실험 설정  |  {self.training_model_combo.currentText()}  |  "
             f"최대 에포크 {self.epochs_spin.value()}  배치 {self.batch_spin.value()}  학습률 {self.learning_rate_spin.value():g}\n"
             f"최적화 {self.optimizer_combo.currentText()}  손실 {self.loss_combo.currentText()}  "
-            f"시드 {self.seed_spin.value()}  노이즈 {noise}  프리셋 {self.preset_combo.currentText()}  "
+            f"시드 {self.seed_spin.value()}  CNN Kernel {self.cnn_kernel_combo.currentData()}  노이즈 {noise}  프리셋 {self.preset_combo.currentText()}  "
             f"실험 {self.experiment_name_edit.text().strip() or '자동 생성'}")
 
     def reset_training_config(self):
@@ -405,6 +417,7 @@ class MainWindow(QMainWindow):
         return {"model_id": self.training_model_combo.currentData(), "preset": self.preset_combo.currentData(),
                 "experiment_name": self.experiment_name_edit.text().strip(), "epochs": self.epochs_spin.value(),
                 "batch_size": self.batch_spin.value(), "learning_rate": self.learning_rate_spin.value(),
+                "cnn_kernel_size": self.cnn_kernel_combo.currentData(),
                 "optimizer": self.optimizer_combo.currentText(), "weight_decay":self.weight_decay_spin.value(),
                 "loss": self.loss_combo.currentText(), "huber_delta":self.huber_delta_spin.value(),
                 "random_seed": self.seed_spin.value(), "reduce_lr_enabled":self.reduce_lr_enabled.isChecked(),
@@ -441,6 +454,7 @@ class MainWindow(QMainWindow):
             self.experiment_name_edit.setText(str(data.get("experiment_name", "")))
             self.epochs_spin.setValue(int(data.get("epochs", 800))); self.batch_spin.setValue(int(data.get("batch_size", 128)))
             self.learning_rate_spin.setValue(float(data.get("learning_rate", .001)))
+            self.cnn_kernel_combo.setCurrentIndex(self.cnn_kernel_combo.findData(int(data.get("cnn_kernel_size", 3))))
             self.optimizer_combo.setCurrentText(str(data.get("optimizer", "Adam"))); self.loss_combo.setCurrentText(str(data.get("loss", "MSE")))
             self.weight_decay_spin.setValue(float(data.get("weight_decay", .0001))); self.huber_delta_spin.setValue(float(data.get("huber_delta", 1.0)))
             self.seed_spin.setValue(int(data.get("random_seed", 42))); self.noise_std_spin.setValue(float(data.get("noise_std", .01)))
@@ -450,7 +464,7 @@ class MainWindow(QMainWindow):
             self.early_stopping_min_delta_spin.setValue(float(data.get("early_stopping_min_delta", .00001))); self.restore_best_weights.setChecked(bool(data.get("restore_best_weights", True)))
             self.noise_type_combo.setCurrentText(str(data.get("noise_type", "Gaussian"))); self.noise_mean_spin.setValue(float(data.get("noise_mean", 0))); self.noise_clip_check.setChecked(bool(data.get("noise_clip", True)))
             self._applying_preset = False
-            self._update_callback_controls(); self._update_model_dependent_controls(); self._update_experiment_summary()
+            self._update_callback_controls(); self._update_model_dependent_controls(); self.update_training_model(); self._update_experiment_summary()
             self._log(f"Training config loaded: {path}")
         except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
             self._applying_preset = False
@@ -462,12 +476,14 @@ class MainWindow(QMainWindow):
         self._applying_preset = True
         model_id = "DENOISING_CNN_LSTM_AUTOENCODER" if preset in ("DENOISING DEFAULT", "DENOISING WEAK 0.005") else "CNN_LSTM_AUTOENCODER"
         self.training_model_combo.setCurrentIndex(self.training_model_combo.findData(model_id))
+        self.cnn_kernel_combo.setCurrentIndex(self.cnn_kernel_combo.findData(5 if preset == "CNN-LSTM KERNEL 5" else 3))
         self.epochs_spin.setValue(800); self.batch_spin.setValue(128); self.optimizer_combo.setCurrentText("Adam"); self.weight_decay_spin.setValue(.0001); self.loss_combo.setCurrentText("MSE"); self.huber_delta_spin.setValue(1.0); self.seed_spin.setValue(42)
         self.reduce_lr_enabled.setChecked(True); self.reduce_lr_factor_spin.setValue(.7); self.reduce_lr_patience_spin.setValue(50); self.min_lr_spin.setValue(0)
         self.early_stopping_enabled.setChecked(True); self.early_stopping_patience_spin.setValue(120); self.early_stopping_min_delta_spin.setValue(.00001); self.restore_best_weights.setChecked(True)
         self.learning_rate_spin.setValue(.0005 if preset == "CNN-LSTM CONSERVATIVE" else .001)
         self.noise_type_combo.setCurrentText("Gaussian"); self.noise_mean_spin.setValue(0); self.noise_std_spin.setValue(.005 if preset == "DENOISING WEAK 0.005" else .01 if preset == "DENOISING DEFAULT" else 0.0); self.noise_clip_check.setChecked(True)
         self._applying_preset = False
+        self.update_training_model()
         self._update_experiment_summary()
 
     def _manual_config_changed(self, *args):
@@ -482,7 +498,7 @@ class MainWindow(QMainWindow):
             scrollbar.setValue(scrollbar.value() - event.angleDelta().y())
             return True
         if event.type() == event.Type.FocusIn:
-            labels = {self.learning_rate_spin:"Learning Rate", self.batch_spin:"Batch Size", self.epochs_spin:"Epoch",
+            labels = {self.cnn_kernel_combo:"CNN Kernel Size", self.learning_rate_spin:"Learning Rate", self.batch_spin:"Batch Size", self.epochs_spin:"Epoch",
                       self.optimizer_combo:"Optimizer", self.loss_combo:"Loss", self.huber_delta_spin:"Huber Delta",
                       self.seed_spin:"Random Seed", self.early_stopping_patience_spin:"EarlyStopping Patience",
                       self.early_stopping_min_delta_spin:"EarlyStopping Min Delta", self.reduce_lr_factor_spin:"ReduceLR Factor",
@@ -493,7 +509,7 @@ class MainWindow(QMainWindow):
 
     def show_parameter_guide(self, name):
         self._selected_parameter_name = name
-        controls = {"Experiment Name":self.experiment_name_edit, "Learning Rate":self.learning_rate_spin, "Batch Size":self.batch_spin, "Epoch":self.epochs_spin,
+        controls = {"Experiment Name":self.experiment_name_edit, "CNN Kernel Size":self.cnn_kernel_combo, "Learning Rate":self.learning_rate_spin, "Batch Size":self.batch_spin, "Epoch":self.epochs_spin,
                     "Optimizer":self.optimizer_combo, "Loss":self.loss_combo, "Huber Delta":self.huber_delta_spin,
                     "Random Seed":self.seed_spin, "EarlyStopping Enabled":self.early_stopping_enabled,
                     "EarlyStopping Patience":self.early_stopping_patience_spin,
@@ -609,7 +625,9 @@ class MainWindow(QMainWindow):
             except (TypeError, ValueError): return str(result.get(key, ""))
         score_display = SCORE_METHODS[result["score_method"]].display_name if result.get("score_method") in SCORE_METHODS else result.get("score_name", result.get("score_method", ""))
         threshold_display = THRESHOLD_METHODS[result["threshold_method"]].display_name if result.get("threshold_method") in THRESHOLD_METHODS else result.get("threshold_name", result.get("threshold_method", ""))
-        values = (result.get("status", ""), result.get("model", "LSTM AutoEncoder"), result.get("experiment_name", ""), result.get("seed", ""), result.get("optimizer", ""),
+        kernel = result.get("cnn_kernel_size")
+        kernel = "unknown" if kernel in (None, "") or isinstance(kernel, float) and math.isnan(kernel) else str(kernel)
+        values = (result.get("status", ""), result.get("model", "LSTM AutoEncoder"), result.get("experiment_name", ""), kernel, result.get("seed", ""), result.get("optimizer", ""),
                   result.get("learning_rate", ""), result.get("loss", ""), result.get("batch_size", ""), result.get("noise_std", ""), score_display,
                   threshold_display, number("threshold", 8), number("accuracy"), number("balanced_accuracy"), number("precision"), number("recall"), number("f1"),
                   result.get("tn", ""), result.get("fp", ""), result.get("fn", ""), result.get("tp", ""), result.get("best_epoch", ""), result.get("best_val_loss", ""), result.get("training_time", ""), result.get("created_at", ""))
@@ -684,7 +702,7 @@ class MainWindow(QMainWindow):
             except (TypeError, ValueError): return 0
         for _, row in frame.iterrows():
             result = {"status":row.get("status", row.get("Status", "HISTORICAL")), "model": row.get("model", row.get("Model", "Historical")), "model_id":row.get("model_id", ""), "experiment_name":row.get("experiment_name", row.get("Experiment", "")), "task_type": row.get("task_type", ""),
-                      "seed":row.get("seed", ""), "optimizer":row.get("optimizer", ""), "learning_rate":row.get("learning_rate", ""), "loss":row.get("loss", ""), "batch_size":row.get("batch_size", ""), "noise_std":row.get("noise_std", ""),
+                      "cnn_kernel_size":row.get("cnn_kernel_size", row.get("Kernel", "")), "seed":row.get("seed", ""), "optimizer":row.get("optimizer", ""), "learning_rate":row.get("learning_rate", ""), "loss":row.get("loss", ""), "batch_size":row.get("batch_size", ""), "noise_std":row.get("noise_std", ""),
                       "score_method":row.get("score_method", row.get("Score Method", "")), "threshold_method":row.get("threshold_method", row.get("Threshold Method", "")),
                       "score_name": row.get("score_method", row.get("Score Method", "")), "threshold_name": row.get("threshold_method", row.get("Threshold Method", "")),
                       "threshold": row.get("threshold", ""), "accuracy": row.get("accuracy", ""), "precision": row.get("precision", ""),
@@ -698,7 +716,7 @@ class MainWindow(QMainWindow):
             return
         output_dir = core.OUTPUT_DIR / "gui_comparisons"; output_dir.mkdir(parents=True, exist_ok=True)
         path = output_dir / f"comparison_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.csv"
-        keys = ["status", "model_id", "model", "experiment_name", "seed", "optimizer", "learning_rate", "loss", "batch_size", "noise_std",
+        keys = ["status", "model_id", "model", "experiment_name", "cnn_kernel_size", "seed", "optimizer", "learning_rate", "loss", "batch_size", "noise_std",
                 "score_method", "threshold_method", "threshold", "accuracy", "balanced_accuracy", "precision", "recall", "f1", "specificity", "fpr", "fnr",
                 "tn", "fp", "fn", "tp", "best_epoch", "best_val_loss", "training_time", "created_at",
                 "effective_threshold_method", "fallback_used", "fallback_reason"]

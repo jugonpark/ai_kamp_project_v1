@@ -1,5 +1,6 @@
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
@@ -36,6 +37,9 @@ class EvaluationControllerTests(unittest.TestCase):
             self.assertIn(key, result)
         self.assertEqual(result["score_method"], "LAST_STEP_MSE")
         self.assertEqual(result["threshold_method"], "PR_INTERSECTION")
+        self.assertEqual(result["cnn_kernel_size"], "unknown")
+        controller.model_run = SimpleNamespace(metadata={"cnn_kernel_size": 5})
+        self.assertEqual(controller.evaluate("LAST_STEP_MSE", "PR_INTERSECTION")["cnn_kernel_size"], 5)
 
     def test_existing_prediction_bundle_is_reused(self):
         from evaluation_controller import EvaluationController

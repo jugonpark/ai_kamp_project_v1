@@ -25,6 +25,7 @@ def discover_model_runs(model_id):
             meta_path = folder / "metadata.json"
             metadata = json.loads(meta_path.read_text(encoding="utf-8")) if meta_path.is_file() else {}
             metadata.setdefault("noise_generation", "legacy_static" if spec.denoising else "none")
+            metadata.setdefault("cnn_kernel_size", "unknown")
             runs.append(ModelRun(model_id, folder.name, model_path, metadata))
     if model_id == "KAMP_LSTM_AE":
         legacy = core.MODEL_DIR / "kamp_lstm_autoencoder.keras"
@@ -47,6 +48,7 @@ def save_model_run(model, history, spec, training_info):
     metadata = {"model_id":spec.id,"model_status":spec.status,"display_name":spec.display_name,"task_type":spec.task_type,
         "created_at":created.isoformat(),"python_version":platform.python_version(),"tensorflow_version":tf.__version__,
         "sequence_length":core.SEQUENCE_LENGTH,"prediction_horizon":core.PREDICTION_HORIZON,
+        "cnn_kernel_size":training_info.get("cnn_kernel_size", 3) if "CNN_LSTM" in spec.id else None,
         "forecast_length":spec.forecast_length,"features":core.FEATURES,"preprocessing":"abs + train-only MinMaxScaler",
         "compatible_score_methods":list(spec.compatible_score_methods),
         "optimizer":training_info.get("optimizer", "Adam"),"learning_rate":training_info.get("learning_rate", 0.001),"batch_size":training_info.get("batch_size", core.BATCH_SIZE),
@@ -72,7 +74,7 @@ def save_model_run(model, history, spec, training_info):
         "split":"KAMP Guidebook-compatible; future STRICT_TIME_SPLIT validation required"}
     (run_dir / "metadata.json").write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
     summary = {key: metadata[key] for key in ("model_id", "model_status", "experiment_name", "created_at", "random_seed",
-               "optimizer", "learning_rate", "loss", "batch_size", "requested_epochs", "completed_epochs",
+               "optimizer", "learning_rate", "loss", "batch_size", "cnn_kernel_size", "requested_epochs", "completed_epochs",
                "best_epoch", "best_val_loss", "training_duration_seconds", "callbacks")}
     summary["denoising"] = {key: metadata[key] for key in ("denoising_enabled", "noise_type", "noise_mean", "noise_std", "noise_clip", "noise_generation")}
     (run_dir / "experiment_summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")

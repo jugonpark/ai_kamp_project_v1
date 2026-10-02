@@ -16,6 +16,15 @@ class TrainingConfigTests(unittest.TestCase):
                     "restore_best_weights", "weight_decay", "huber_delta", "noise_type",
                     "noise_mean", "noise_std", "noise_clip"):
             self.assertIn(key, config)
+        self.assertEqual(config["cnn_kernel_size"], 3)
+
+    def test_cnn_kernel_size_accepts_only_supported_integer_values(self):
+        from training_config import validate_training_config
+        for value in (3, 5, 7):
+            self.assertEqual(validate_training_config({"cnn_kernel_size": value})["cnn_kernel_size"], value)
+        for value in (0, 2, 9, 3.5, "5", True):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                validate_training_config({"cnn_kernel_size": value})
 
     def test_invalid_training_values_are_rejected(self):
         from training_config import validate_training_config
@@ -34,7 +43,7 @@ class TrainingConfigTests(unittest.TestCase):
 
     def test_config_save_load_round_trip_preserves_callbacks(self):
         from training_config import default_training_config, load_training_config, save_training_config
-        config = default_training_config(); config.update({"experiment_name":"ROUND_TRIP", "reduce_lr_factor":.6, "early_stopping_patience":77})
+        config = default_training_config(); config.update({"experiment_name":"ROUND_TRIP", "reduce_lr_factor":.6, "early_stopping_patience":77, "cnn_kernel_size":5})
         folder = Path.cwd() / "outputs" / ".test_artifacts" / uuid.uuid4().hex
         try:
             path = save_training_config(folder / "config.json", config)
@@ -44,6 +53,11 @@ class TrainingConfigTests(unittest.TestCase):
         self.assertEqual(loaded["experiment_name"], "ROUND_TRIP")
         self.assertEqual(loaded["reduce_lr_factor"], .6)
         self.assertEqual(loaded["early_stopping_patience"], 77)
+        self.assertEqual(loaded["cnn_kernel_size"], 5)
+
+    def test_legacy_config_defaults_kernel_to_three(self):
+        from training_config import validate_training_config
+        self.assertEqual(validate_training_config({"epochs": 10})["cnn_kernel_size"], 3)
 
     def test_optimizer_and_huber_settings_reach_keras_objects(self):
         from training_config import default_training_config
