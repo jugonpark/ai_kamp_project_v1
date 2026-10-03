@@ -13,7 +13,7 @@ class DynamicSequenceModelsTests(unittest.TestCase):
         config = default_training_config()
         for model_id in ("KAMP_LSTM_AE", "GRU_AUTOENCODER", "CNN_LSTM_AUTOENCODER",
                          "DENOISING_CNN_LSTM_AUTOENCODER"):
-            for length in (10, 15, 20):
+            for length in (5, 10, 15, 20):
                 with self.subTest(model_id=model_id, length=length):
                     runtime = {**default_preprocessing_config(), "sequence_length": length}
                     model = build_training_model(MODEL_REGISTRY[model_id], config, runtime)

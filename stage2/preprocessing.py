@@ -7,7 +7,7 @@ from pathlib import Path
 import pandas as pd
 from sklearn.preprocessing import MinMaxScaler, StandardScaler
 
-from preprocessing_config import validate_preprocessing_config
+from preprocessing_config import STAGE2_SEQUENCE_LENGTHS, validate_preprocessing_config
 from train_lstm_ae import FEATURES
 from .data_quality import QualityResult, inspect_csv, fingerprint_csv_source
 from .splitting import SegmentSplits, split_segments
@@ -110,7 +110,7 @@ def run_stage2_preprocessing(normal_path: str | Path, anomaly_path: str | Path,
     full_counts = {f"seq{length}": {
         "normal": window_count_summary(normal.frame, length, config["stride"]),
         "anomaly": window_count_summary(anomaly.frame, length, config["stride"])}
-        for length in (10, 15, 20)}
+        for length in STAGE2_SEQUENCE_LENGTHS}
     summary = {
         "normal_raw_rows": normal.report["rows_before"],
         "normal_cleaned_rows": normal.report["rows_after"],

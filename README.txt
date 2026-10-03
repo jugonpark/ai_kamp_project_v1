@@ -243,7 +243,9 @@ Window-level Metric은 각 Observation Window의 Precision, Recall, F1, FP, FN�
 계산합니다. Segment-level Metric은 Artifact에 저장된 Test anomaly Segment
 전체를 대상으로 탐지 여부와 시점을 별도로 집계합니다. Window가 없는 짧은
 Segment는 NOT_EVALUABLE이며 Missed와 구분하고 Detection Rate 분모에서
-제외합니다. Segment Detection Rate는 Detected / Evaluable입니다.
+제외합니다. Segment Coverage는 Evaluable / 전체 Test anomaly Segment이고,
+Segment Detection Rate는 Detected / Evaluable입니다. 전체 Segment가 0개이면
+두 비율을 미정으로 표시합니다.
 Segment-relative Detection Delay는 실제 Segment 첫 원본 sample 시각부터
 첫 alarm Window의 끝 시각까지의 시간입니다. 첫 evaluable Window의 끝 시각부터
 첫 alarm까지의 지연도 따로 표시합니다. 평균·중앙값·최댓값은 탐지된 Segment에만
@@ -279,9 +281,9 @@ Segment-aware ON, Use Horizon OFF, 동일한 데이터 분할·모델·seed·학
 - Exp2: RAW SIGNED, MinMaxScaler, Seq20.
 - Exp3: RAW SIGNED, StandardScaler, Seq20.
 
-Exp1~3 결과로 전처리 조건을 선택한 뒤 그 조건에서 Seq10, Seq15, Seq20을
+Exp1~3 결과로 전처리 조건을 선택한 뒤 그 조건에서 Seq5, Seq10, Seq15, Seq20을
 비교합니다. 최종 후보에는 Temporal NONE과 여러 EWMA alpha를 적용합니다.
-각 후보의 Precision, Recall, F1, FP, FN과 Segment Detection Rate,
+각 후보의 Precision, Recall, F1, FP, FN과 Segment Coverage, Segment Detection Rate,
 Median Segment-relative Detection Delay를 비교합니다. False Alarm,
 Miss, Detection Delay 사이의 trade-off를 함께 판단합니다. Test set을 반복해서
 튜닝하면 최종 성능 추정이 낙관적으로 변할 수 있습니다.
@@ -300,3 +302,28 @@ Known Limitations
 - Segment-relative Detection Delay는 anomaly Segment 시작 기준 탐지 지연시간이며
   물리적 failure lead time이 아닙니다. 기존 detection_delay_samples/seconds는
   관측 가능한 label 전환에서만 계산되는 별도 legacy 지표입니다.
+
+AUTO Sequence Fallback (오프라인)
+--------------------------------
+Stage 2는 Seq5, Seq10, Seq15, Seq20을 지원합니다. 각 Sequence마다 별도
+Processed Dataset과 별도 고정 입력 길이 모델을 학습·저장해야 합니다. 평가 화면의
+`AUTO Sequence Fallback`에서 같은 모델 종류의 저장 실행을 둘 이상 선택하면,
+원본 해시·전체 전처리 설정(Sequence 제외)·분할 정책과 Segment ID가 같은지
+먼저 검사합니다. CNN-LSTM과 Denoising CNN-LSTM은 한 pool에 섞을 수 없습니다.
+
+오프라인 평가는 Test Segment 전체 길이를 알고 있으므로, 각 Segment에 대해
+사용 가능한 가장 긴 Sequence 모델 하나만 선택합니다. 길이 5 미만은
+NOT_EVALUABLE입니다. 한 Segment의 Window가 여러 모델의 최종 지표에
+중복 집계되지 않습니다. 각 모델은 자기 Validation으로 Score/Temporal/Threshold를
+계산하며, 모델별 임계값을 보존한 후 최종 이진 판정만 합칩니다. GUI에서는
+같은 Score, Threshold, Temporal 설정을 pool 전체에 적용하고 Comparison CSV에
+모델별 임계값과 run ID를 기록합니다. Segment Coverage와 Detection Rate는
+별도로 확인하세요.
+
+향후 실시간 입력에서는 Segment 최종 길이를 미리 알 수 없습니다. 5개 sample이
+쌓이면 Seq5, 10개면 Seq10, 15개면 Seq15, 20개면 Seq20의 판단이 가능하다는
+progressive routing 개념만 남겨 둡니다. 현재 AUTO 기능은 오프라인 평가이며
+실시간 streaming 추론은 구현하지 않았습니다. 기존 고정 입력 CNN/LSTM에
+짧은 Segment를 zero padding하면 0이 실제 표준화 신호인지 padding인지
+구별되지 않고 Conv1D까지 고려한 masking이 필요하므로 padding을 사용하지
+않습니다. 실제 모델 학습과 실험 선택은 사용자가 GUI에서 수행합니다.

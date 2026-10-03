@@ -15,11 +15,16 @@ class PreprocessingWorkerTests(unittest.TestCase):
         worker.failed.connect(failures.append)
         worker.finished.connect(lambda: finished.append(True))
         with patch("preprocessing_worker.inspect_csv") as inspect, patch(
-                "preprocessing_worker.run_stage2_preprocessing") as preprocess:
-            inspect.side_effect = [SimpleNamespace(report={"segment_count": 599}),
-                                   SimpleNamespace(report={"segment_count": 21})]
+                "preprocessing_worker.run_stage2_preprocessing") as preprocess, patch(
+                "preprocessing_worker.window_count_summary", return_value={
+                    "windows": 10, "eligible_segments": 2}) as counts:
+            inspect.side_effect = [SimpleNamespace(report={"segment_count": 599}, frame=object()),
+                                   SimpleNamespace(report={"segment_count": 21}, frame=object())]
             worker.run()
-        self.assertEqual(reports, [{"normal": {"segment_count": 599}, "anomaly": {"segment_count": 21}}])
+        self.assertEqual(reports, [{"normal": {"segment_count": 599, "selected_sequence_windows": {
+            "windows": 10, "eligible_segments": 2}}, "anomaly": {"segment_count": 21,
+            "selected_sequence_windows": {"windows": 10, "eligible_segments": 2}}}])
+        self.assertEqual(counts.call_count, 2)
         self.assertEqual([call.kwargs["expected_label"] for call in inspect.call_args_list], [0, 1])
         preprocess.assert_not_called()
         self.assertEqual(failures, [])

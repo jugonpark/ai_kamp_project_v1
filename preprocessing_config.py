@@ -9,6 +9,7 @@ DEFAULT_CONFIG_DIR = Path(__file__).resolve().parent / "configs" / "preprocessin
 MODES = ("STAGE2_SEGMENT_AWARE", "KAMP_BASELINE")
 TRANSFORMS = ("ABS_ALL", "RAW_SIGNED", "ABS_VIBRATION_RAW_CURRENT")
 SCALERS = ("MINMAX", "STANDARD")
+STAGE2_SEQUENCE_LENGTHS = (5, 10, 15, 20)
 
 
 def default_preprocessing_config(mode="STAGE2_SEGMENT_AWARE") -> dict:
@@ -42,8 +43,8 @@ def validate_preprocessing_config(config: dict) -> dict:
             raise ValueError(f"{key} must be a positive integer")
     if result["gap_threshold_ms"] <= result["expected_interval_ms"]:
         raise ValueError("gap_threshold_ms must exceed expected_interval_ms")
-    if result["sequence_length"] not in (10, 15, 20):
-        raise ValueError("sequence_length must be 10, 15, or 20")
+    if result["sequence_length"] not in STAGE2_SEQUENCE_LENGTHS:
+        raise ValueError("sequence_length must be 5, 10, 15, or 20")
     for key in ("remove_exact_duplicates", "segment_aware", "use_horizon"):
         if type(result[key]) is not bool:
             raise ValueError(f"{key} must be boolean")

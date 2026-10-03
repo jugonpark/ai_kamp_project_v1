@@ -23,6 +23,10 @@ MODEL_REGISTRY = {
  "LSTM_FORECAST_5": ModelSpec("LSTM_FORECAST_5","LSTM Forecast 5-Step","FORECAST","과거 20 timestep으로 다음 5 timestep 센서를 예측.","INPUT 20×3\n↓\nLSTM64 → LSTM32 → Dense64\n↓\nRepeatVector5\n↓\nLSTM32 → LSTM64\n↓\nFORECAST 5×3",build_lstm_forecast_5,5, status="HISTORICAL"),
 }
 
+PROCESSED_DATASET_MODEL_IDS = (
+    "KAMP_LSTM_AE", "CNN_LSTM_AUTOENCODER", "DENOISING_CNN_LSTM_AUTOENCODER",
+)
+
 def build_model(model_id, sequence_length=None, feature_count=None):
     spec = MODEL_REGISTRY[model_id]
     if spec.task_type != "RECONSTRUCTION":

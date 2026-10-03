@@ -8,11 +8,12 @@ class EvaluationWorker(QObject):
     loaded = Signal(dict)
     result_ready = Signal(dict)
     comparison_ready = Signal(list)
+    auto_ready = Signal(dict)
     failed = Signal(str)
     finished = Signal()
 
     def __init__(self, controller, action, score_method=None, threshold_method=None,
-                 temporal_method="NONE", ewma_alpha=0.4, timestamp_aware=True):
+                 temporal_method="NONE", ewma_alpha=0.4, timestamp_aware=True, auto_runs=None):
         super().__init__()
         self.controller = controller
         self.action = action
@@ -21,6 +22,7 @@ class EvaluationWorker(QObject):
         self.temporal_method = temporal_method
         self.ewma_alpha = ewma_alpha
         self.timestamp_aware = timestamp_aware
+        self.auto_runs = auto_runs
 
     @Slot()
     def run(self):
@@ -49,6 +51,12 @@ class EvaluationWorker(QObject):
                 self.status_changed.emit("COMPARING MODELS")
                 self.comparison_ready.emit(self.controller.compare_models(self.score_method, self.threshold_method,
                     lambda done, total: self.log_message.emit(f"Compare Models: {done}/{total}"),
+                    self.temporal_method, self.ewma_alpha, self.timestamp_aware))
+            elif self.action == "auto_sequence":
+                from stage2.adaptive_sequence import evaluate_auto_sequence
+                self.status_changed.emit("AUTO SEQUENCE EVALUATING")
+                self.auto_ready.emit(evaluate_auto_sequence(
+                    self.auto_runs, self.score_method, self.threshold_method,
                     self.temporal_method, self.ewma_alpha, self.timestamp_aware))
             else:
                 raise ValueError(f"Unknown evaluation action: {self.action}")

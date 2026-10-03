@@ -11,7 +11,7 @@ from sklearn.metrics import (accuracy_score, balanced_accuracy_score,
                              recall_score)
 
 import train_lstm_ae as core
-from model_registry import MODEL_REGISTRY
+from model_registry import MODEL_REGISTRY, PROCESSED_DATASET_MODEL_IDS
 from model_data import create_task_bundle
 from model_artifacts import discover_model_runs
 from anomaly_scoring import SCORE_METHODS, compute_scores, fit_score_calibration
@@ -42,18 +42,24 @@ class EvaluationController:
             preprocessing_config if preprocessing_config is not None else default_preprocessing_config("KAMP_BASELINE"))
         self.model_run = None
         self._last_segment_details = []
+        self._last_window_predictions = None
 
     def select_run(self, model_run):
         self.model_run = model_run
         self.model_id = model_run.model_id; self.model_spec = MODEL_REGISTRY[self.model_id]
         self.model_path = Path(model_run.model_path); self._bundle = None
         self._last_segment_details = []
+        self._last_window_predictions = None
         self.preprocessing_config = (preprocessing_from_metadata(model_run.metadata)
             if (model_run.metadata or {}).get("data_mode") == "PROCESSED_DATASET"
             else default_preprocessing_config("KAMP_BASELINE"))
 
     @property
     def is_loaded(self): return self._bundle is not None
+
+    @property
+    def last_window_predictions(self):
+        return None if self._last_window_predictions is None else self._last_window_predictions.copy()
 
     @staticmethod
     def _signature(path: Path):
@@ -150,8 +156,8 @@ class EvaluationController:
         if not force and key in self._prediction_cache:
             self._bundle = self._prediction_cache[key]
             return {"cache_hit": True, **self._bundle["summary"]}
-        if self.model_spec.id != "KAMP_LSTM_AE" or self.model_spec.task_type != "RECONSTRUCTION":
-            raise ValueError("Processed Dataset evaluation currently supports KAMP_LSTM_AE reconstruction only")
+        if self.model_spec.id not in PROCESSED_DATASET_MODEL_IDS or self.model_spec.task_type != "RECONSTRUCTION":
+            raise ValueError(f"Unsupported Processed Dataset reconstruction model: {self.model_spec.id}")
         valid, test = artifact.validation, artifact.test
         x_valid, x_test = valid["X"], test["X"]
         y_valid, y_test = valid["y"].astype(int), test["y"].astype(int)
@@ -190,6 +196,7 @@ class EvaluationController:
         return {"cache_hit": False, **summary}
 
     def load_model_and_predictions(self, force=False):
+        self._last_window_predictions = None
         data_mode = (getattr(self.model_run, "metadata", {}) or {}).get("data_mode", "KAMP_BASELINE")
         if data_mode not in ("KAMP_BASELINE", "PROCESSED_DATASET"):
             raise ValueError(f"Unsupported evaluation data_mode: {data_mode}")
@@ -329,6 +336,7 @@ class EvaluationController:
                 test_meta.get("contains_timestamp_gap") if timestamp_aware else None)
         threshold_result = calculate_threshold(threshold_method, valid_scores, y_valid)
         prediction = (test_scores > threshold_result.threshold).astype(int)
+        self._last_window_predictions = prediction.copy()
         tn, fp, fn, tp = confusion_matrix(y_test, prediction, labels=[0, 1]).ravel()
         delay_samples, delay_seconds = self._delay(y_test, prediction, self._bundle.get("test_metadata", {}))
         gap_threshold = self._bundle.get("test_metadata", {}).get("timestamp_gap_threshold")

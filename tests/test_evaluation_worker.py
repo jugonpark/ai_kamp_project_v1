@@ -1,7 +1,7 @@
 """GUI temporal selection and worker forwarding without loading model weights."""
 import os
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -72,6 +72,20 @@ class TemporalGuiTests(unittest.TestCase):
 
 
 class EvaluationWorkerTests(unittest.TestCase):
+    def test_auto_worker_forwards_pool_and_common_strategy(self):
+        from evaluation_worker import EvaluationWorker
+        runs = [object(), object()]
+        worker = EvaluationWorker(Mock(), "auto_sequence", "ROBUST_TOPK_10", "PR_INTERSECTION",
+                                  "EWMA", .4, True, auto_runs=runs)
+        results, errors = [], []
+        worker.auto_ready.connect(results.append)
+        worker.failed.connect(errors.append)
+        with patch("stage2.adaptive_sequence.evaluate_auto_sequence", return_value={"mode": "AUTO_SEQUENCE_FALLBACK"}) as evaluate:
+            worker.run()
+        evaluate.assert_called_once_with(runs, "ROBUST_TOPK_10", "PR_INTERSECTION", "EWMA", .4, True)
+        self.assertEqual(results, [{"mode": "AUTO_SEQUENCE_FALLBACK"}])
+        self.assertEqual(errors, [])
+
     def test_forwards_temporal_settings(self):
         from evaluation_worker import EvaluationWorker
         controller = Mock()

@@ -30,14 +30,17 @@ class Stage2DetectionGuiTests(unittest.TestCase):
                       "sequence_length": 20, "temporal_method": "EWMA", "ewma_alpha": .4,
                       "anomaly_segments_total": 3, "evaluable_anomaly_segments": 2,
                       "non_evaluable_anomaly_segments": 1, "detected_segments": 1,
-                      "missed_segments": 1, "segment_detection_rate": .5,
+                      "missed_segments": 1, "segment_coverage": 2 / 3,
+                      "segment_detection_rate": .5,
                       "median_segment_delay_seconds": 2.2}
             window._evaluation_result_without_history(result)
             self.assertEqual(window.segment_result_labels["segment_detection_rate"].text(), "0.5")
+            self.assertEqual(window.segment_result_labels["segment_coverage"].text(), "66.67%")
             window._append_comparison(result)
             headers = [window.comparison_table.horizontalHeaderItem(i).text()
                        for i in range(window.comparison_table.columnCount())]
             self.assertIn("Segment Detection Rate", headers)
+            self.assertIn("Segment Coverage", headers)
             self.assertIn("Median Segment-relative Delay (seconds)", headers)
             self.assertEqual(window.comparison_table.item(0, headers.index("Sequence")).text(), "20")
             from train_lstm_ae import OUTPUT_DIR
@@ -50,12 +53,14 @@ class Stage2DetectionGuiTests(unittest.TestCase):
                 with exported.open(newline="", encoding="utf-8-sig") as handle:
                     row = next(csv.DictReader(handle))
                 self.assertEqual(row["segment_detection_rate"], "0.5")
+                self.assertEqual(row["segment_coverage"], str(2 / 3))
                 self.assertEqual(row["median_segment_delay_seconds"], "2.2")
                 legacy = folder / "legacy.csv"
                 legacy.write_text("model,score_method,threshold_method\nold,LAST_STEP_MSE,PR_INTERSECTION\n", encoding="utf-8")
                 with patch("gui_app.QFileDialog.getOpenFileName", return_value=(str(legacy), "")):
                     window.import_historical_result()
                 self.assertEqual(window.comparison_history[-1]["segment_detection_rate"], "")
+                self.assertEqual(window.comparison_history[-1]["segment_coverage"], "")
             finally:
                 shutil.rmtree(folder)
             window._evaluation_result_without_history({**result, "data_mode": "KAMP_BASELINE",

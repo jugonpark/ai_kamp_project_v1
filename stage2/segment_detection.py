@@ -10,7 +10,7 @@ from pathlib import Path
 
 METRIC_KEYS = (
     "anomaly_segments_total", "evaluable_anomaly_segments", "non_evaluable_anomaly_segments",
-    "detected_segments", "missed_segments", "segment_detection_rate",
+    "detected_segments", "missed_segments", "segment_coverage", "segment_detection_rate",
     "mean_segment_delay_seconds", "median_segment_delay_seconds", "max_segment_delay_seconds",
     "mean_post_evaluable_delay_seconds", "median_post_evaluable_delay_seconds",
     "max_post_evaluable_delay_seconds",
@@ -79,18 +79,24 @@ def stage2_segment_detection_metrics(inventory: list[dict], test_batch: dict,
                 row.update(missed=True, status="MISSED")
         details.append(row)
 
+    return summarize_segment_details(details), details
+
+
+def summarize_segment_details(details: list[dict]) -> dict:
+    """Summarize one selected prediction per anomaly Segment."""
     detected = [row for row in details if row["detected"]]
     evaluable = sum(row["evaluable"] for row in details)
     result = {"anomaly_segments_total": len(details), "evaluable_anomaly_segments": evaluable,
               "non_evaluable_anomaly_segments": len(details) - evaluable,
               "detected_segments": len(detected), "missed_segments": evaluable - len(detected),
+              "segment_coverage": evaluable / len(details) if details else None,
               "segment_detection_rate": len(detected) / evaluable if evaluable else None}
     for source, prefix in (("delay_from_segment_start_seconds", "segment_delay_seconds"),
                            ("delay_after_first_evaluable_seconds", "post_evaluable_delay_seconds")):
         values = [row[source] for row in detected]
         for method in ("mean", "median", "max"):
             result[f"{method}_{prefix}"] = float(getattr(np, method)(values)) if values else None
-    return result, details
+    return result
 
 
 def save_segment_detail_csv(model_run, details: list[dict]) -> Path:

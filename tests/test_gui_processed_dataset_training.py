@@ -1,5 +1,6 @@
 import os
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -20,8 +21,12 @@ class ProcessedDatasetTrainingGuiTests(unittest.TestCase):
             self.assertFalse(window.processed_dataset_combo.isEnabled())
             window.data_mode_combo.setCurrentIndex(window.data_mode_combo.findData("PROCESSED_DATASET"))
             self.assertTrue(window.processed_dataset_combo.isEnabled())
-            self.assertEqual(window.training_model_combo.count(), 1)
-            self.assertEqual(window.training_model_combo.currentData(), "KAMP_LSTM_AE")
+            self.assertEqual(window.training_model_combo.count(), 3)
+            self.assertEqual(window.training_model_combo.currentData(), "CNN_LSTM_AUTOENCODER")
+            self.assertEqual({window.training_model_combo.itemData(i) for i in range(3)},
+                             {"KAMP_LSTM_AE", "CNN_LSTM_AUTOENCODER", "DENOISING_CNN_LSTM_AUTOENCODER"})
+            window.processed_dataset_combo.setCurrentIndex(
+                window.processed_dataset_combo.findText("stage2_exp01_abs_minmax_seq20"))
             self.assertEqual(window.system_labels["Dataset"].text(), "stage2_exp01_abs_minmax_seq20")
             self.assertIn("Train: 7411 | Validation: 646 | Test: 2197", window.processed_dataset_summary_label.text())
             window.sequence_combo.setCurrentIndex(window.sequence_combo.findData(15))
@@ -48,6 +53,24 @@ class ProcessedDatasetTrainingGuiTests(unittest.TestCase):
         finally:
             window.close()
 
+    def test_standard_artifact_disables_denoising_noise_clip(self):
+        from gui_app import MainWindow
+        window = MainWindow()
+        try:
+            window.data_mode_combo.setCurrentIndex(window.data_mode_combo.findData("PROCESSED_DATASET"))
+            window.training_model_combo.setCurrentIndex(
+                window.training_model_combo.findData("DENOISING_CNN_LSTM_AUTOENCODER"))
+            original = window._selected_processed_artifact
+            window._selected_processed_artifact = SimpleNamespace(
+                config={"preprocessing": {**original.config["preprocessing"], "scaler": "STANDARD"}})
+            window._update_model_dependent_controls()
+            self.assertFalse(window.noise_clip_check.isEnabled())
+            self.assertTrue(window.noise_clip_check.isChecked())
+            self.assertIn("요청: ON | 실제 적용: OFF", window.noise_clip_policy_label.text())
+            window._selected_processed_artifact = original
+        finally:
+            window.close()
+
     def test_immediate_evaluation_keeps_dataset_identity_in_comparison(self):
         from gui_app import MainWindow
         window = MainWindow()
@@ -57,7 +80,7 @@ class ProcessedDatasetTrainingGuiTests(unittest.TestCase):
                 "signal_transform": "ABS_ALL", "scaler": "MINMAX", "gap_threshold_ms": 150,
                 "threshold": .1, "accuracy": .9, "precision": .7, "recall": .6, "f1_score": .65,
                 "confusion_matrix": [[10, 2], [3, 4]]})
-            self.assertEqual(window.comparison_table.columnCount(), 35)
+            self.assertEqual(window.comparison_table.columnCount(), 36)
             self.assertIn("stage2_exp01_abs_minmax_seq20", window.comparison_table.item(0, 2).text())
             self.assertEqual(window.comparison_history[0]["signal_transform"], "ABS_ALL")
             self.assertIn("Gap: 150 ms", window.comparison_table.item(0, 2).toolTip())

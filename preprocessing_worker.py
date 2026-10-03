@@ -6,6 +6,7 @@ from PySide6.QtCore import QObject, Signal, Slot
 from preprocessing_config import validate_preprocessing_config
 from stage2.data_quality import inspect_csv
 from stage2.preprocessing import run_stage2_preprocessing
+from stage2.windowing import window_count_summary
 
 
 class PreprocessingWorker(QObject):
@@ -27,7 +28,11 @@ class PreprocessingWorker(QObject):
             if self.action == "analyze":
                 normal = inspect_csv(self.normal_path, self.config, expected_label=0)
                 anomaly = inspect_csv(self.anomaly_path, self.config, expected_label=1)
-                self.analysis_ready.emit({"normal": normal.report, "anomaly": anomaly.report})
+                self.analysis_ready.emit({
+                    "normal": {**normal.report, "selected_sequence_windows": window_count_summary(
+                        normal.frame, self.config["sequence_length"], self.config["stride"])},
+                    "anomaly": {**anomaly.report, "selected_sequence_windows": window_count_summary(
+                        anomaly.frame, self.config["sequence_length"], self.config["stride"])}})
             elif self.action == "preprocess":
                 self.preprocessing_ready.emit(run_stage2_preprocessing(
                     self.normal_path, self.anomaly_path, self.config))

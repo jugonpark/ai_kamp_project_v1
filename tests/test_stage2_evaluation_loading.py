@@ -118,7 +118,7 @@ class Stage2EvaluationLoadingTests(unittest.TestCase):
 
     def test_dynamic_sequence_prediction_shapes(self):
         original = load_processed_dataset(DATASET)
-        for length in (10, 15, 20):
+        for length in (5, 10, 15, 20):
             config = {**original.config, "preprocessing": {
                 **original.config["preprocessing"], "sequence_length": length}}
             valid = {**original.validation, "X": original.validation["X"][:, :length, :]}

@@ -87,6 +87,7 @@ class Stage2SegmentDetectionTests(unittest.TestCase):
         metrics, rows = stage2_segment_detection_metrics(inventory, windows, [0, 1, 1, 0, 0, 0], 20)
         self.assertEqual([row["status"] for row in rows], ["DETECTED", "DETECTED", "MISSED", "NOT_EVALUABLE"])
         self.assertEqual(metrics["segment_detection_rate"], 2 / 3)
+        self.assertEqual(metrics["segment_coverage"], 3 / 4)
         self.assertAlmostEqual(metrics["mean_segment_delay_seconds"], 2.05)
         self.assertAlmostEqual(metrics["median_segment_delay_seconds"], 2.05)
         self.assertAlmostEqual(metrics["max_segment_delay_seconds"], 2.2)

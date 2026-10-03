@@ -30,6 +30,14 @@ class PreprocessingConfigTests(unittest.TestCase):
         finally:
             shutil.rmtree(folder, ignore_errors=True)
 
+    def test_seq5_stage2_allowed_without_changing_baseline(self):
+        stage2 = validate_preprocessing_config({"sequence_length": 5})
+        self.assertEqual(stage2["sequence_length"], 5)
+        self.assertEqual(default_preprocessing_config("KAMP_BASELINE")["sequence_length"], 20)
+        with self.assertRaises(ValueError):
+            validate_preprocessing_config({**default_preprocessing_config("KAMP_BASELINE"),
+                                           "sequence_length": 5})
+
     def test_invalid_values_rejected(self):
         for change in ({"gap_threshold_ms": 100}, {"sequence_length": 12},
                        {"stride": 0}, {"remove_exact_duplicates": 1},

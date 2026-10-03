@@ -104,6 +104,8 @@ def save_model_run(model, history, spec, training_info, preprocessing_config=Non
         "training_duration_seconds":training_info.get("training_duration_seconds"),
         "split":"KAMP Guidebook-compatible; future STRICT_TIME_SPLIT validation required"}
     if training_info.get("data_mode") == "PROCESSED_DATASET":
+        metadata["noise_clip_requested"] = bool(training_info.get("noise_clip_requested", training_info.get("noise_clip", True)))
+        metadata["noise_clip_effective"] = bool(training_info.get("noise_clip_effective", training_info.get("noise_clip", True)))
         metadata.update({key: training_info[key] for key in (
             "data_mode", "processed_dataset_path", "dataset_config_sha256", "source_csv_sha256")})
         metadata["split"] = "Processed Dataset artifact: chronological whole segments"

@@ -27,7 +27,7 @@ class ProcessedDatasetTrainingTests(unittest.TestCase):
     def test_artifact_labels_and_dynamic_kamp_shapes(self):
         artifact = load_processed_dataset(DATASET_PATH)
         self.assertTrue(np.all(artifact.train["y"] == 0))
-        for length in (10, 15, 20):
+        for length in (5, 10, 15, 20):
             config = {**default_preprocessing_config(), "sequence_length": length}
             model = build_training_model(MODEL_REGISTRY["KAMP_LSTM_AE"], {}, config)
             self.assertEqual(model.input_shape, (None, length, 3))
@@ -111,6 +111,11 @@ class ProcessedDatasetTrainingTests(unittest.TestCase):
                  patch.object(model_artifacts.plot_utils, "save_training_loss"):
                 run = model_artifacts.save_model_run(DummyModel(), SimpleNamespace(history={"loss": [.1], "val_loss": [.2]}),
                     MODEL_REGISTRY["KAMP_LSTM_AE"], info, preprocessing_config=artifact.config["preprocessing"])
+                denoising_run = model_artifacts.save_model_run(
+                    DummyModel(), SimpleNamespace(history={"loss": [.1], "val_loss": [.2]}),
+                    MODEL_REGISTRY["DENOISING_CNN_LSTM_AUTOENCODER"],
+                    {**info, "noise_clip_requested": True, "noise_clip_effective": False},
+                    preprocessing_config={**artifact.config["preprocessing"], "scaler": "STANDARD"})
                 baseline = model_artifacts.save_model_run(DummyModel(), SimpleNamespace(history={"loss": [.1], "val_loss": [.2]}),
                     MODEL_REGISTRY["KAMP_LSTM_AE"], {"requested_epochs": 1},
                     preprocessing_config=default_preprocessing_config("KAMP_BASELINE"))
@@ -118,9 +123,16 @@ class ProcessedDatasetTrainingTests(unittest.TestCase):
             self.assertEqual(saved["preprocessing"], artifact.config["preprocessing"])
             self.assertEqual(saved["artifact_windows"], {"train": 7411, "validation": 646, "test": 2197})
             self.assertEqual(saved["data_mode"], "PROCESSED_DATASET")
+            denoising = json.loads((denoising_run.model_path.parent / "metadata.json").read_text(encoding="utf-8"))
+            self.assertEqual(denoising["model_id"], "DENOISING_CNN_LSTM_AUTOENCODER")
+            self.assertEqual(denoising["scaler"], "STANDARD")
+            self.assertTrue(denoising["denoising_enabled"])
+            self.assertTrue(denoising["noise_clip_requested"])
+            self.assertFalse(denoising["noise_clip_effective"])
             legacy = json.loads((baseline.model_path.parent / "metadata.json").read_text(encoding="utf-8"))
             self.assertNotIn("data_mode", legacy)
             self.assertNotIn("artifact_windows", legacy)
+            self.assertNotIn("noise_clip_effective", legacy)
         finally:
             shutil.rmtree(root, ignore_errors=True)
 

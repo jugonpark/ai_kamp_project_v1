@@ -13,7 +13,8 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QFormLayout, 
     QGroupBox, QHBoxLayout, QLabel, QMainWindow, QMessageBox, QPushButton,
     QPlainTextEdit, QProgressBar, QTabWidget, QTableWidget, QTableWidgetItem,
     QVBoxLayout, QWidget, QSpinBox, QDoubleSpinBox, QLineEdit, QFileDialog,
-    QScrollArea, QSplitter, QSizePolicy, QAbstractSpinBox)
+    QScrollArea, QSplitter, QSizePolicy, QAbstractSpinBox, QListWidget,
+    QListWidgetItem, QAbstractItemView)
 import tensorflow as tf
 
 import training_engine
@@ -22,7 +23,7 @@ from anomaly_scoring import SCORE_METHODS
 from threshold_methods import THRESHOLD_METHODS
 from evaluation_controller import EvaluationController
 from evaluation_worker import EvaluationWorker
-from model_registry import MODEL_REGISTRY
+from model_registry import MODEL_REGISTRY, PROCESSED_DATASET_MODEL_IDS
 from model_artifacts import discover_model_runs, append_evaluation_result
 from stage2.segment_detection import METRIC_KEYS, save_segment_detail_csv
 from training_graph import TrainingGraphTab
@@ -31,7 +32,7 @@ from stage2.dataset_artifacts import (save_processed_dataset, validate_dataset_i
     discover_processed_datasets, load_processed_dataset)
 from gui_help import PARAMETER_HELP, format_parameter_help
 from training_config import load_training_config as load_config_file, save_training_config as save_config_file, validate_training_config
-from preprocessing_config import (DEFAULT_CONFIG_DIR, default_preprocessing_config,
+from preprocessing_config import (DEFAULT_CONFIG_DIR, STAGE2_SEQUENCE_LENGTHS, default_preprocessing_config,
     validate_preprocessing_config, save_preprocessing_config, load_preprocessing_config)
 
 
@@ -213,6 +214,9 @@ class MainWindow(QMainWindow):
             self._add_guided_row(callback_form, label, widget, guide)
         for label, widget, guide in (("노이즈 종류",self.noise_type_combo,"Noise Type"),("노이즈 평균",self.noise_mean_spin,"Noise Mean"),("노이즈 표준편차",self.noise_std_spin,"Noise Std"),("노이즈 적용 후 범위 제한",self.noise_clip_check,"Noise Clip")):
             self._add_guided_row(denoising_form, label, widget, guide)
+        self.noise_clip_policy_label = QLabel()
+        self.noise_clip_policy_label.setWordWrap(True)
+        denoising_form.addRow(self.noise_clip_policy_label)
         preset_form.addRow("프리셋", self.preset_combo)
         guide_box = QGroupBox("파라미터 설명"); guide_layout = QVBoxLayout(guide_box)
         self.parameter_guide = QLabel(); self.parameter_guide.setWordWrap(True)
@@ -334,6 +338,21 @@ class MainWindow(QMainWindow):
         self.loaded_architecture_label = QLabel("-")
         selector_form.addRow("불러온 모델 구조", self.loaded_architecture_label)
         settings_layout.addWidget(selectors)
+        auto_box = QGroupBox("AUTO Sequence Fallback (오프라인 Segment 평가)")
+        auto_layout = QVBoxLayout(auto_box)
+        self.auto_pool_list = QListWidget()
+        self.auto_pool_list.setSelectionMode(QAbstractItemView.MultiSelection)
+        self.auto_pool_list.setMaximumHeight(110)
+        auto_layout.addWidget(QLabel("같은 모델 종류와 전처리 조건으로 학습한 Seq별 실행을 2개 이상 선택하세요."))
+        auto_layout.addWidget(self.auto_pool_list)
+        self.refresh_auto_pool_button = QPushButton("저장 모델 목록 새로고침")
+        self.refresh_auto_pool_button.clicked.connect(self.refresh_auto_pool_runs)
+        self.run_auto_button = QPushButton("AUTO Sequence 평가")
+        self.run_auto_button.clicked.connect(self.run_auto_evaluation)
+        auto_actions = QHBoxLayout()
+        auto_actions.addWidget(self.refresh_auto_pool_button)
+        auto_actions.addWidget(self.run_auto_button)
+        auto_layout.addLayout(auto_actions)
         self.load_model_button = QPushButton("모델 불러오기"); self.load_model_button.clicked.connect(self.load_evaluation_model)
         self.run_evaluation_button = QPushButton("평가 실행"); self.run_evaluation_button.clicked.connect(self.run_evaluation)
         self.compare_all_button = QPushButton("전체 방식 비교"); self.compare_all_button.clicked.connect(self.compare_all)
@@ -349,6 +368,7 @@ class MainWindow(QMainWindow):
         for index, button in enumerate((self.load_model_button, self.run_evaluation_button, self.compare_all_button, self.sweep_ewma_button, self.compare_models_button)):
             execution_actions.addWidget(button, index // 3, index % 3)
         settings_layout.addLayout(execution_actions)
+        settings_layout.addWidget(auto_box)
         record_actions = QGridLayout()
         for index, button in enumerate((self.clear_comparison_button, self.export_comparison_button, self.import_history_button, self.set_baseline_button, self.set_champion_button, self.show_history_graph_button)):
             record_actions.addWidget(button, index // 3, index % 3)
@@ -373,6 +393,7 @@ class MainWindow(QMainWindow):
             ("evaluable_anomaly_segments", "Evaluable Segments"),
             ("non_evaluable_anomaly_segments", "Non-evaluable Segments"),
             ("detected_segments", "Detected Segments"), ("missed_segments", "Missed Segments"),
+            ("segment_coverage", "Segment Coverage"),
             ("segment_detection_rate", "Segment Detection Rate"),
             ("mean_segment_delay_seconds", "Mean Delay From Start (seconds)"),
             ("median_segment_delay_seconds", "Median Delay From Start (seconds)"),
@@ -394,7 +415,7 @@ class MainWindow(QMainWindow):
             combo = QComboBox(); combo.addItem("전체", "ALL"); combo.currentIndexChanged.connect(self.apply_history_filters); self.history_filters[name] = combo
             filter_layout.addWidget(QLabel({"Model":"모델", "Status":"상태", "Score":"점수", "Threshold":"임계값 방식", "Loss":"손실 함수", "Seed":"시드"}[name])); filter_layout.addWidget(combo)
         history_layout.addLayout(filter_layout)
-        columns = ["상태", "모델", "실험", "Architecture", "시드", "최적화", "학습률", "손실 함수", "배치", "노이즈 표준편차", "점수", "임계값 방식", "임계값", "정확도", "균형 정확도", "정밀도", "재현율", "F1", "정상 정확 판정 (TN)", "오경보 (FP)", "미탐 (FN)", "이상 정확 탐지 (TP)", "최적 에포크", "최적 검증 손실", "학습 시간", "생성 시각", "Temporal", "Alpha", "Timestamp Reset", "Total Error", "Delay", "Pareto", "Sequence", "Segment Detection Rate", "Median Segment-relative Delay (seconds)"]
+        columns = ["상태", "모델", "실험", "Architecture", "시드", "최적화", "학습률", "손실 함수", "배치", "노이즈 표준편차", "점수", "임계값 방식", "임계값", "정확도", "균형 정확도", "정밀도", "재현율", "F1", "정상 정확 판정 (TN)", "오경보 (FP)", "미탐 (FN)", "이상 정확 탐지 (TP)", "최적 에포크", "최적 검증 손실", "학습 시간", "생성 시각", "Temporal", "Alpha", "Timestamp Reset", "Total Error", "Delay", "Pareto", "Sequence", "Segment Coverage", "Segment Detection Rate", "Median Segment-relative Delay (seconds)"]
         self.comparison_table = QTableWidget(0, len(columns)); self.comparison_table.setHorizontalHeaderLabels(columns)
         history_layout.addWidget(self.comparison_table); results_layout.addWidget(history_box, 1)
         self.delta_comparison_label = QLabel("기준 실험과 현재 실험을 선택하면 차이를 표시합니다."); self.delta_comparison_label.setWordWrap(True); results_layout.addWidget(self.delta_comparison_label)
@@ -456,7 +477,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(signal_box)
         window_box = QGroupBox("관측 윈도우"); window_form = QFormLayout(window_box)
         self.sequence_combo = QComboBox()
-        for length in (10, 15, 20): self.sequence_combo.addItem(str(length), length)
+        for length in STAGE2_SEQUENCE_LENGTHS: self.sequence_combo.addItem(str(length), length)
         self.stride_spin = QSpinBox(); self.stride_spin.setRange(1, 100000)
         self.use_horizon_check = QCheckBox("사용 안 함")
         self.baseline_horizon_spin = QSpinBox(); self.baseline_horizon_spin.setRange(1, 100000)
@@ -775,6 +796,10 @@ class MainWindow(QMainWindow):
             report = reports[dataset]
             lines.append("[정상 데이터]" if dataset == "normal" else "[이상 데이터]")
             lines.extend(f"{title}: {report.get(key, '-')}" for key, title in labels)
+            if "selected_sequence_windows" in report:
+                counts = report["selected_sequence_windows"]
+                lines.append(f"선택 시퀀스 윈도우 수: {counts['windows']}")
+                lines.append(f"윈도우 생성 가능 구간 수: {counts['eligible_segments']}")
             lines.append("")
         return "\n".join(lines)
 
@@ -1029,12 +1054,13 @@ class MainWindow(QMainWindow):
         self.training_model_combo.blockSignals(True)
         self.training_model_combo.clear()
         if processed:
-            spec = MODEL_REGISTRY["KAMP_LSTM_AE"]
-            self.training_model_combo.addItem(spec.display_name, spec.id)
+            for model_id in PROCESSED_DATASET_MODEL_IDS:
+                spec = MODEL_REGISTRY[model_id]
+                self.training_model_combo.addItem(spec.display_name, spec.id)
         else:
             for spec in MODEL_REGISTRY.values():
                 if spec.status == "ACTIVE": self.training_model_combo.addItem(spec.display_name, spec.id)
-        wanted = "KAMP_LSTM_AE" if processed else current_model
+        wanted = (current_model if current_model in PROCESSED_DATASET_MODEL_IDS else "CNN_LSTM_AUTOENCODER") if processed else current_model
         index = self.training_model_combo.findData(wanted)
         self.training_model_combo.setCurrentIndex(index if index >= 0 else self.training_model_combo.findData("CNN_LSTM_AUTOENCODER"))
         self.training_model_combo.blockSignals(False)
@@ -1083,12 +1109,21 @@ class MainWindow(QMainWindow):
         self._refresh_preprocessing_display()
         if self.training_model_combo.currentData() and self._selected_processed_artifact is not None:
             self.update_training_model()
+        self._update_model_dependent_controls()
 
     def _update_model_dependent_controls(self, *_):
         denoising = self.training_model_combo.currentData() == "DENOISING_CNN_LSTM_AUTOENCODER"
         self.model_structure_box.setVisible(self.training_model_combo.currentData() in {"CNN_LSTM_AUTOENCODER", "DENOISING_CNN_LSTM_AUTOENCODER"})
         self.denoising_box.setVisible(denoising)
-        self.noise_std_spin.setEnabled(denoising)
+        self.noise_std_spin.setEnabled(denoising and not self._training_locked)
+        standard = (denoising and self.data_mode_combo.currentData() == "PROCESSED_DATASET"
+                    and self._selected_processed_artifact is not None
+                    and self._selected_processed_artifact.config["preprocessing"]["scaler"] == "STANDARD")
+        self.noise_clip_check.setEnabled(denoising and not standard and not self._training_locked)
+        self.noise_clip_policy_label.setText(
+            f"노이즈 범위 제한 요청: {'ON' if self.noise_clip_check.isChecked() else 'OFF'} | 실제 적용: OFF. "
+            "StandardScaler의 음수와 1 초과 값을 유지합니다."
+            if standard else "")
         self._update_experiment_summary()
 
     def _update_callback_controls(self, *_):
@@ -1231,7 +1266,22 @@ class MainWindow(QMainWindow):
         self.evaluation_run_combo.clear()
         self.loaded_architecture_label.setText("-")
         for run in discover_model_runs(self.evaluation_model_combo.currentData()): self.evaluation_run_combo.addItem(run.run_id, run)
+        if hasattr(self, "auto_pool_list"): self.refresh_auto_pool_runs()
         if hasattr(self, "score_combo"): self.update_algorithm_description()
+
+    def refresh_auto_pool_runs(self):
+        selected = {item.data(Qt.UserRole).model_path for item in self.auto_pool_list.selectedItems()}
+        self.auto_pool_list.clear()
+        model_id = self.evaluation_model_combo.currentData()
+        if model_id not in PROCESSED_DATASET_MODEL_IDS:
+            return
+        for run in discover_model_runs(model_id):
+            if (run.metadata or {}).get("data_mode") != "PROCESSED_DATASET":
+                continue
+            item = QListWidgetItem(f"Seq{run.metadata.get('sequence_length', '?')} | {run.run_id} | {run.metadata.get('dataset_id', '?')}")
+            item.setData(Qt.UserRole, run)
+            self.auto_pool_list.addItem(item)
+            item.setSelected(run.model_path in selected)
 
     def update_algorithm_description(self):
         score_id = self.score_combo.currentData()
@@ -1265,15 +1315,17 @@ class MainWindow(QMainWindow):
         self.update_algorithm_description()
 
     def _set_evaluation_busy(self, busy):
-        for button in (self.load_model_button, self.run_evaluation_button, self.compare_all_button, self.sweep_ewma_button, self.compare_models_button): button.setEnabled(not busy)
+        for button in (self.load_model_button, self.run_evaluation_button, self.compare_all_button, self.sweep_ewma_button, self.compare_models_button,
+                       self.refresh_auto_pool_button, self.run_auto_button): button.setEnabled(not busy)
+        self.auto_pool_list.setEnabled(not busy)
         for widget in (self.temporal_combo, self.ewma_alpha_spin, self.timestamp_aware_check):
             widget.setEnabled(not busy and (widget is not self.ewma_alpha_spin or self.temporal_combo.currentData() == "EWMA"))
 
-    def _start_evaluation_worker(self, action):
+    def _start_evaluation_worker(self, action, auto_runs=None):
         if self.evaluation_thread and self.evaluation_thread.isRunning():
             self._log("Evaluation is already running")
             return
-        if action not in ("load", "compare_models") and not self.evaluation_controller.is_loaded:
+        if action not in ("load", "compare_models", "auto_sequence") and not self.evaluation_controller.is_loaded:
             QMessageBox.information(self, "Evaluation", "LOAD MODEL을 먼저 실행하세요.")
             return
         self._set_evaluation_busy(True)
@@ -1281,7 +1333,7 @@ class MainWindow(QMainWindow):
         self.evaluation_worker = EvaluationWorker(self.evaluation_controller, action,
             self.score_combo.currentData(), self.threshold_combo.currentData(),
             self.temporal_combo.currentData(), self.ewma_alpha_spin.value(),
-            self.timestamp_aware_check.isChecked())
+            self.timestamp_aware_check.isChecked(), auto_runs=auto_runs)
         self.evaluation_worker.moveToThread(self.evaluation_thread)
         self.evaluation_thread.started.connect(self.evaluation_worker.run)
         self.evaluation_worker.status_changed.connect(self._update_evaluation_status)
@@ -1289,6 +1341,7 @@ class MainWindow(QMainWindow):
         self.evaluation_worker.loaded.connect(self._evaluation_loaded)
         self.evaluation_worker.result_ready.connect(self._evaluation_result)
         self.evaluation_worker.comparison_ready.connect(self._comparison_results)
+        self.evaluation_worker.auto_ready.connect(self._auto_evaluation_result)
         self.evaluation_worker.failed.connect(self._evaluation_failed)
         self.evaluation_worker.finished.connect(self.evaluation_thread.quit)
         self.evaluation_thread.finished.connect(self._evaluation_thread_finished)
@@ -1302,6 +1355,13 @@ class MainWindow(QMainWindow):
     def compare_all(self): self._start_evaluation_worker("compare_all")
     def sweep_ewma(self): self._start_evaluation_worker("sweep_ewma")
     def compare_models(self): self._start_evaluation_worker("compare_models")
+
+    def run_auto_evaluation(self):
+        runs = [item.data(Qt.UserRole) for item in self.auto_pool_list.selectedItems()]
+        if len(runs) < 2:
+            QMessageBox.warning(self, "AUTO Sequence", "서로 다른 Sequence의 저장 모델을 2개 이상 선택하세요.")
+            return
+        self._start_evaluation_worker("auto_sequence", auto_runs=runs)
 
     def _update_evaluation_status(self, status):
         spec = MODEL_REGISTRY[self.evaluation_model_combo.currentData()]
@@ -1347,6 +1407,21 @@ class MainWindow(QMainWindow):
         if result["fallback_used"]: self._log(f"Threshold fallback: {result['fallback_reason']}")
         self.evaluation_pages.setCurrentIndex(1)
 
+    def _auto_evaluation_result(self, result):
+        self._evaluation_result_without_history(result)
+        self.evaluation_dataset_label.setText(
+            f"AUTO Sequence pool | Seq {result['available_sequences']}\n"
+            f"Signal: {result['signal_transform']} | Scaler: {result['scaler']} | "
+            f"Gap: {result['gap_threshold_ms']} ms\nRuns: {result['auto_pool']}")
+        self.evaluation_gap_label.setText(f"{result['gap_threshold_ms']} ms")
+        self.eval_status_label.setText(
+            f"AUTO Sequence 완료 | {result['model_id']} | Seq {result['available_sequences']} | "
+            f"각 Sequence별 Validation 임계값 사용")
+        self._append_comparison({**result, "status": "AUTO"})
+        self._log(f"AUTO Sequence evaluation: {result['test_windows']} selected windows; "
+                  f"per-tier thresholds {result['auto_tier_thresholds']}")
+        self.evaluation_pages.setCurrentIndex(1)
+
     def _comparison_results(self, results):
         for result in results: self._append_comparison(result)
         if results:
@@ -1366,7 +1441,7 @@ class MainWindow(QMainWindow):
         return f"EWMA α={alpha} → Timestamp Reset {'ON' if result.get('timestamp_aware', True) else 'OFF'}"
 
     def _evaluation_result_without_history(self, result):
-        values = {"Threshold": f"{result['threshold']:.8g}", "Accuracy": f"{result['accuracy']:.6f}",
+        values = {"Threshold": "시퀀스별" if result["threshold"] is None else f"{result['threshold']:.8g}", "Accuracy": f"{result['accuracy']:.6f}",
             "Balanced Accuracy": f"{result['balanced_accuracy']:.6f}", "Precision": f"{result['precision']:.6f}",
             "Recall": f"{result['recall']:.6f}", "F1 Score": f"{result['f1']:.6f}", "Specificity": f"{result['specificity']:.6f}",
             "FPR": f"{result['fpr']:.6f}", "FNR": f"{result['fnr']:.6f}", "TN": str(result['tn']),
@@ -1378,7 +1453,8 @@ class MainWindow(QMainWindow):
     def _show_segment_metrics(self, result):
         for key in METRIC_KEYS:
             value = result.get(key)
-            self.segment_result_labels[key].setText("-" if value is None or value == "" else str(value))
+            self.segment_result_labels[key].setText(
+                "-" if value is None or value == "" else f"{float(value):.2%}" if key == "segment_coverage" else str(value))
 
     def _append_comparison(self, result):
         fingerprint = (str(result.get("model_id", result.get("model", ""))), str(result.get("experiment_name", "")),
@@ -1387,6 +1463,7 @@ class MainWindow(QMainWindow):
                        str(result.get("temporal_method", "NONE")), str(result.get("ewma_alpha", "")),
                        str(result.get("timestamp_aware", True)),
                        str(result.get("dataset_id", "")), str(result.get("sequence_length", "")),
+                       str(result.get("auto_pool", "")),
                        str(result.get("signal_transform", "")), str(result.get("scaler", "")))
         if any(item.get("_fingerprint") == fingerprint for item in self.comparison_history): return
         result = result.copy(); result["_fingerprint"] = fingerprint
@@ -1408,7 +1485,7 @@ class MainWindow(QMainWindow):
                   result.get("tn", ""), result.get("fp", ""), result.get("fn", ""), result.get("tp", ""), result.get("best_epoch", ""), result.get("best_val_loss", ""), result.get("training_time", ""), result.get("created_at", ""),
                   result.get("temporal_method", "NONE"), result.get("ewma_alpha", ""), result.get("timestamp_aware", True), result.get("total_error", ""),
                   result.get("detection_delay_samples", ""), result.get("pareto", ""),
-                  result.get("sequence_length", ""), number("segment_detection_rate"),
+                  result.get("sequence_length", ""), number("segment_coverage"), number("segment_detection_rate"),
                   number("median_segment_delay_seconds"))
         for column, value in enumerate(values): self.comparison_table.setItem(row, column, QTableWidgetItem(str(value)))
         if result.get("dataset_id"):
@@ -1416,6 +1493,12 @@ class MainWindow(QMainWindow):
                 f"Data Mode: {result.get('data_mode')}\nDataset: {result['dataset_id']}\n"
                 f"Sequence: {result.get('sequence_length')} | Signal: {result.get('signal_transform')} | "
                 f"Scaler: {result.get('scaler')} | Gap: {result.get('gap_threshold_ms')} ms")
+        elif result.get("auto_pool"):
+            self.comparison_table.item(row, 2).setToolTip(
+                f"AUTO pool: {result['auto_pool']}\nPer-tier thresholds: {result.get('auto_tier_thresholds', '')}\n"
+                f"Effective methods: {result.get('auto_tier_methods', '')}\n"
+                f"Signal: {result.get('signal_transform')} | Scaler: {result.get('scaler')} | "
+                f"Gap: {result.get('gap_threshold_ms')} ms")
         self.comparison_table.item(row, 0).setData(Qt.UserRole, len(self.comparison_history) - 1)
         self._refresh_filter_values(); self.apply_history_filters()
         if hasattr(self, "comparison_summary_label"): self._update_comparison_summary()
@@ -1496,6 +1579,8 @@ class MainWindow(QMainWindow):
                           "stride", "gap_threshold_ms", "signal_transform", "scaler", "use_horizon", "prediction_horizon")},
                       "total_error": row.get("total_error", ""), "detection_delay_samples": row.get("detection_delay_samples", ""),
                       "detection_delay_seconds": row.get("detection_delay_seconds", ""), "pareto": row.get("pareto", ""),
+                      "auto_pool": row.get("auto_pool", ""), "auto_tier_thresholds": row.get("auto_tier_thresholds", ""),
+                      "auto_tier_methods": row.get("auto_tier_methods", ""),
                       **{key: row.get(key, "") for key in METRIC_KEYS},
                       "balanced_accuracy":row.get("balanced_accuracy", ""), "recall": row.get("recall", ""), "f1": row.get("f1", row.get("F1", "")), "tn":safe_int(row.get("tn", row.get("TN", 0))), "fp":safe_int(row.get("fp", row.get("FP", 0))), "fn":safe_int(row.get("fn", row.get("FN", 0))), "tp":safe_int(row.get("tp", row.get("TP", 0))), "best_epoch":row.get("best_epoch", ""), "best_val_loss":row.get("best_val_loss", ""), "training_time":row.get("training_time", ""), "created_at":row.get("created_at", "")}
             self._append_comparison(result)
@@ -1513,7 +1598,8 @@ class MainWindow(QMainWindow):
                 "effective_threshold_method", "fallback_used", "fallback_reason", "temporal_method", "ewma_alpha", "timestamp_aware",
                 "timestamp_gap_threshold", "total_error", "detection_delay_samples", "detection_delay_seconds", "pareto",
                 "preprocessing_mode", "data_mode", "dataset_id", "sequence_length", "stride", "gap_threshold_ms",
-                "signal_transform", "scaler", "use_horizon", "prediction_horizon", *METRIC_KEYS]
+                "signal_transform", "scaler", "use_horizon", "prediction_horizon", "auto_pool", "auto_tier_thresholds",
+                "auto_tier_methods", *METRIC_KEYS]
         with path.open("x", newline="", encoding="utf-8-sig") as handle:
             writer = csv.DictWriter(handle, fieldnames=keys); writer.writeheader()
             for result in self.comparison_history: writer.writerow({key: result.get(key, "") for key in keys})
@@ -1538,8 +1624,9 @@ class MainWindow(QMainWindow):
         data_mode = self.data_mode_combo.currentData()
         processed_path = None
         if data_mode == "PROCESSED_DATASET":
-            if self.training_model_combo.currentData() != "KAMP_LSTM_AE":
-                QMessageBox.warning(self, "Invalid Model", "Processed Dataset은 현재 KAMP_LSTM_AE만 지원합니다."); return
+            model_id = self.training_model_combo.currentData()
+            if model_id not in PROCESSED_DATASET_MODEL_IDS or MODEL_REGISTRY[model_id].task_type != "RECONSTRUCTION":
+                QMessageBox.warning(self, "Invalid Model", f"지원하지 않는 Processed Dataset 모델: {model_id}"); return
             processed_path = self.processed_dataset_combo.currentData()
             try:
                 if not processed_path: raise ValueError("Processed Dataset을 선택하세요.")

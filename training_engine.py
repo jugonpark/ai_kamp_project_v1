@@ -9,7 +9,7 @@ import tensorflow as tf
 from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
 
 import train_lstm_ae as core
-from model_registry import MODEL_REGISTRY
+from model_registry import MODEL_REGISTRY, PROCESSED_DATASET_MODEL_IDS
 from model_data import create_task_bundle, prepare_fit_data
 from model_artifacts import append_evaluation_result, save_model_run
 from training_config import apply_random_seed, default_training_config, validate_training_config
@@ -240,8 +240,9 @@ class TrainingWorker(QObject):
 
     def _run_processed_dataset(self):
         """Train on immutable artifact windows without any preprocessing pass."""
-        if self.selected_model_id != "KAMP_LSTM_AE":
-            raise ValueError("Processed Dataset currently supports KAMP_LSTM_AE only")
+        spec = MODEL_REGISTRY.get(self.selected_model_id)
+        if self.selected_model_id not in PROCESSED_DATASET_MODEL_IDS or spec.task_type != "RECONSTRUCTION":
+            raise ValueError(f"Unsupported Processed Dataset reconstruction model: {self.selected_model_id}")
         if self.processed_dataset_path is None:
             raise ValueError("Processed Dataset path is required")
         artifact = load_processed_dataset(self.processed_dataset_path)
@@ -275,7 +276,6 @@ class TrainingWorker(QObject):
         self._log(f"Processed Dataset: {artifact.dataset_id} | Train {len(x_train)} | Validation {len(x_valid)} | Test {len(x_test)}")
         self._log(f"Artifact preprocessing: {actual}")
         self.status_changed.emit("BUILDING MODEL")
-        spec = MODEL_REGISTRY[self.selected_model_id]
         model = build_training_model(spec, self.config, actual)
         if tuple(model.input_shape[1:]) != tuple(x_train.shape[1:]) or tuple(model.output_shape[1:]) != tuple(x_train.shape[1:]):
             raise ValueError("Model input/output shape does not match Processed Dataset")
@@ -297,9 +297,22 @@ class TrainingWorker(QObject):
         callbacks.append(self.callback)
         self.status_changed.emit("TRAINING")
         training_started = time.monotonic()
-        history = model.fit(x_train, x_train, batch_size=int(self.config["batch_size"]),
-                            validation_data=(x_valid[normal_mask], x_valid[normal_mask]),
-                            epochs=max_epochs, shuffle=False, callbacks=callbacks, verbose=0)
+        requested_clip = bool(self.config["noise_clip"])
+        effective_clip = bool(spec.denoising and actual["scaler"] == "MINMAX" and requested_clip)
+        if spec.denoising:
+            self._log(f"Noise clipping requested: {'ON' if requested_clip else 'OFF'} | "
+                      f"effective: {'ON' if effective_clip else 'OFF'}"
+                      + (" | StandardScaler preserves the signed range." if actual["scaler"] == "STANDARD" else ""))
+        fit_inputs, fit_targets, valid_inputs, valid_targets = prepare_fit_data(
+            x_train, x_train, x_valid[normal_mask], x_valid[normal_mask], spec.denoising,
+            self.config["noise_mean"], self.config["noise_std"], effective_clip,
+            self.config["random_seed"], self.config["batch_size"])
+        fit_kwargs = {"validation_data": (valid_inputs, valid_targets), "epochs": max_epochs,
+                      "shuffle": False, "callbacks": callbacks, "verbose": 0}
+        if spec.denoising:
+            history = model.fit(fit_inputs, **fit_kwargs)
+        else:
+            history = model.fit(fit_inputs, fit_targets, batch_size=int(self.config["batch_size"]), **fit_kwargs)
         self.status_changed.emit("EVALUATING")
         valid_prediction = model.predict(x_valid, verbose=0)
         valid_error = np.square(x_valid - valid_prediction)[:, -1, :].mean(axis=1)
@@ -320,6 +333,7 @@ class TrainingWorker(QObject):
             "normal_rows": summary["normal_rows"], "anomaly_rows": summary["anomaly_rows"],
             "train_sequences": len(x_train), "valid_samples": len(x_valid), "test_samples": len(x_test),
             "data_mode": "PROCESSED_DATASET", "dataset_id": artifact.dataset_id,
+            "noise_clip_requested": requested_clip, "noise_clip_effective": effective_clip,
             "processed_dataset_path": str(artifact.path.resolve()), "dataset_config_sha256": config_hash,
             "source_csv_sha256": {stream: artifact.config["source"][stream]["sha256"] for stream in ("normal", "anomaly")}},
             preprocessing_config=actual)
