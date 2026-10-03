@@ -73,6 +73,7 @@ def detect_timestamp_segments(
     timestamps,
     expected_interval: float | None = None,
     gap_factor: float = 1.5,
+    gap_threshold_seconds: float | None = None,
 ) -> tuple[np.ndarray, float | None]:
     """Return segment IDs and gap threshold in seconds.
 
@@ -101,7 +102,12 @@ def detect_timestamp_segments(
         interval = float(expected_interval)
         if not np.isfinite(interval) or interval <= 0:
             raise ValueError("expected_interval must be finite and positive")
-    threshold = None if interval is None else interval * float(gap_factor)
+    if gap_threshold_seconds is not None:
+        threshold = float(gap_threshold_seconds)
+        if not np.isfinite(threshold) or threshold <= 0:
+            raise ValueError("gap_threshold_seconds must be finite and positive")
+    else:
+        threshold = None if interval is None else interval * float(gap_factor)
     breaks = ~np.isfinite(differences) | (differences <= 0)
     if threshold is not None:
         breaks |= differences > threshold

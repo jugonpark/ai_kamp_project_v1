@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import hashlib
 
 import numpy as np
 import tensorflow as tf
@@ -17,6 +18,11 @@ from anomaly_scoring import SCORE_METHODS, compute_scores, fit_score_calibration
 from threshold_methods import THRESHOLD_METHODS, calculate_threshold
 from score_postprocessing import (TEMPORAL_METHOD_NONE, TEMPORAL_METHOD_EWMA,
                                   apply_temporal_processing, fp_fn_pareto_flags)
+from preprocessing_config import (default_preprocessing_config, validate_preprocessing_config,
+                                  preprocessing_from_metadata)
+from stage2.dataset_artifacts import (DEFAULT_DATASET_ROOT, discover_processed_datasets,
+                                      load_processed_dataset)
+from stage2.segment_detection import inventory_from_artifact, stage2_segment_detection_metrics
 
 
 EWMA_SWEEP_ALPHAS = (0.02, 0.04, 0.05, 0.10, 0.20, 0.30, 0.40, 0.60, 0.80, 1.00)
@@ -25,17 +31,26 @@ EWMA_SWEEP_ALPHAS = (0.02, 0.04, 0.05, 0.10, 0.20, 0.30, 0.40, 0.60, 0.80, 1.00)
 class EvaluationController:
     _prediction_cache: dict[tuple, dict] = {}
 
-    def __init__(self, model_path=None, normal_path=None, anomaly_path=None, model_id="KAMP_LSTM_AE"):
+    def __init__(self, model_path=None, normal_path=None, anomaly_path=None, model_id="KAMP_LSTM_AE",
+                 preprocessing_config=None):
         self.model_id = model_id; self.model_spec = MODEL_REGISTRY[model_id]
         self.model_path = Path(model_path or (core.MODEL_DIR / "kamp_lstm_autoencoder.keras"))
         self.normal_path = Path(normal_path or core.NORMAL_PATH)
         self.anomaly_path = Path(anomaly_path or core.OUTLIER_PATH)
         self._bundle: dict | None = None
+        self.preprocessing_config = validate_preprocessing_config(
+            preprocessing_config if preprocessing_config is not None else default_preprocessing_config("KAMP_BASELINE"))
+        self.model_run = None
+        self._last_segment_details = []
 
     def select_run(self, model_run):
         self.model_run = model_run
         self.model_id = model_run.model_id; self.model_spec = MODEL_REGISTRY[self.model_id]
         self.model_path = Path(model_run.model_path); self._bundle = None
+        self._last_segment_details = []
+        self.preprocessing_config = (preprocessing_from_metadata(model_run.metadata)
+            if (model_run.metadata or {}).get("data_mode") == "PROCESSED_DATASET"
+            else default_preprocessing_config("KAMP_BASELINE"))
 
     @property
     def is_loaded(self): return self._bundle is not None
@@ -47,6 +62,8 @@ class EvaluationController:
         return str(path.resolve()), stat.st_mtime_ns, stat.st_size
 
     def cache_key(self):
+        if (getattr(self.model_run, "metadata", {}) or {}).get("data_mode") == "PROCESSED_DATASET":
+            return self._processed_cache_key(self._processed_artifact())
         paths = (self.model_path, self.normal_path, self.anomaly_path)
         signatures = tuple(self._signature(path) for path in paths)
         config = (self.model_id, self.model_spec.task_type, self.model_spec.forecast_length,
@@ -55,7 +72,129 @@ class EvaluationController:
                   tuple(core.FEATURES))
         return signatures + config
 
+    def _processed_cache_key(self, artifact):
+        config = artifact.config["preprocessing"]
+        identity = (self.model_id, self.model_spec.task_type, artifact.dataset_id,
+                    hashlib.sha256((artifact.path / "dataset_config.json").read_bytes()).hexdigest(),
+                    hashlib.sha256((artifact.path / "file_manifest.json").read_bytes()).hexdigest(),
+                    config["sequence_length"], config["signal_transform"], config["scaler"],
+                    config["gap_threshold_ms"], config["stride"])
+        return (self._signature(self.model_path), *identity)
+
+    def _processed_artifact(self):
+        metadata = getattr(self.model_run, "metadata", {}) or {}
+        dataset_id = metadata.get("dataset_id")
+        if not dataset_id:
+            raise ValueError("Processed model metadata is missing dataset_id")
+        candidates = []
+        if metadata.get("processed_dataset_path"):
+            candidates.append(Path(metadata["processed_dataset_path"]))
+        candidates.append(DEFAULT_DATASET_ROOT / dataset_id)
+        def paths():
+            yield from candidates
+            for item in discover_processed_datasets():
+                if item["dataset_id"] == dataset_id:
+                    yield Path(item["path"])
+        seen = set()
+        for path in paths():
+            path = path.resolve()
+            if path in seen: continue
+            seen.add(path)
+            if not path.exists(): continue
+            artifact = load_processed_dataset(path)
+            if artifact.dataset_id != dataset_id:
+                raise ValueError(f"Dataset ID mismatch: model={dataset_id}, artifact={artifact.dataset_id}")
+            actual = artifact.config["preprocessing"]
+            saved = metadata.get("preprocessing")
+            if not isinstance(saved, dict):
+                raise ValueError(f"Dataset {dataset_id}: model preprocessing metadata is missing")
+            for key in ("mode", "sequence_length", "signal_transform", "scaler", "stride",
+                        "gap_threshold_ms", "segment_aware", "use_horizon"):
+                if saved.get(key) != actual[key]:
+                    raise ValueError(f"Dataset {dataset_id}: model/artifact {key} mismatch")
+            expected_hash = metadata.get("dataset_config_sha256")
+            if expected_hash and hashlib.sha256((artifact.path / "dataset_config.json").read_bytes()).hexdigest() != expected_hash:
+                raise ValueError(f"Dataset {dataset_id}: dataset_config SHA-256 mismatch")
+            source_hashes = metadata.get("source_csv_sha256") or {}
+            for stream in ("normal", "anomaly"):
+                if stream in source_hashes and source_hashes[stream] != artifact.config["source"][stream]["sha256"]:
+                    raise ValueError(f"Dataset {dataset_id}: {stream} source SHA-256 mismatch")
+            return artifact
+        raise FileNotFoundError(f"Processed Dataset {dataset_id} not found at saved path or project outputs")
+
+    @staticmethod
+    def _artifact_evaluation_metadata(batch, gap_threshold_ms, dataset_id):
+        streams = np.asarray(batch["stream_type"])
+        raw_ids = np.asarray(batch["segment_ids"], dtype=np.int64)
+        stream_ids = (streams == "ANOMALY").astype(np.int8)
+        # Stream-local segment IDs may overlap. Offset anomaly IDs so EWMA
+        # always resets at the NORMAL -> ANOMALY boundary without re-segmenting.
+        offset = int(raw_ids[stream_ids == 0].max(initial=-1)) + 1
+        segment_ids = raw_ids + stream_ids.astype(np.int64) * offset
+        return {"dataset_id": dataset_id,
+                "segment_ids": segment_ids, "source_segment_ids": raw_ids,
+                "stream_type": streams, "stream_ids": stream_ids,
+                "contains_timestamp_gap": np.zeros(len(raw_ids), dtype=bool),
+                # A window is one evaluation sample, timestamped at its final row.
+                "sample_timestamps": batch["window_end_timestamp"],
+                "window_start_timestamp": batch["window_start_timestamp"],
+                "window_end_timestamp": batch["window_end_timestamp"],
+                "source_row_start": batch["source_row_start"],
+                "source_row_end": batch["source_row_end"],
+                "timestamp_gap_threshold": gap_threshold_ms / 1000,
+                "gap_threshold_ms": gap_threshold_ms}
+
+    def _load_processed_predictions(self, force=False):
+        artifact = self._processed_artifact()  # Validates files even on a cache hit.
+        key = self._processed_cache_key(artifact)
+        if not force and key in self._prediction_cache:
+            self._bundle = self._prediction_cache[key]
+            return {"cache_hit": True, **self._bundle["summary"]}
+        if self.model_spec.id != "KAMP_LSTM_AE" or self.model_spec.task_type != "RECONSTRUCTION":
+            raise ValueError("Processed Dataset evaluation currently supports KAMP_LSTM_AE reconstruction only")
+        valid, test = artifact.validation, artifact.test
+        x_valid, x_test = valid["X"], test["X"]
+        y_valid, y_test = valid["y"].astype(int), test["y"].astype(int)
+        model = tf.keras.models.load_model(self.model_path, compile=False)
+        expected = tuple(x_valid.shape[1:])
+        if (expected != tuple(x_test.shape[1:]) or tuple(model.input_shape[1:]) != expected
+                or tuple(model.output_shape[1:]) != expected):
+            raise ValueError(f"Dataset {artifact.dataset_id}: model/input/output shape mismatch: "
+                             f"model={model.input_shape}, validation={x_valid.shape}, test={x_test.shape}")
+        predict = model.predict
+        valid_prediction = predict(x_valid, verbose=0)
+        test_prediction = predict(x_test, verbose=0)
+        if valid_prediction.shape != x_valid.shape or test_prediction.shape != x_test.shape:
+            raise ValueError(f"Dataset {artifact.dataset_id}: prediction/target shape mismatch")
+        valid_error = np.square(x_valid - valid_prediction)
+        test_error = np.square(x_test - test_prediction)
+        if not np.isfinite(valid_error).all() or not np.isfinite(test_error).all():
+            raise ValueError(f"Dataset {artifact.dataset_id}: model prediction contains NaN or Inf")
+        config = artifact.config["preprocessing"]
+        summary = {"model_path": str(self.model_path.resolve()), "model_id": self.model_id,
+                   "task_type": self.model_spec.task_type, "error_name": "Reconstruction Error",
+                   "data_mode": "PROCESSED_DATASET", "dataset_id": artifact.dataset_id,
+                   "sequence_length": config["sequence_length"], "signal_transform": config["signal_transform"],
+                   "scaler": config["scaler"], "gap_threshold_ms": config["gap_threshold_ms"],
+                   "valid_samples": len(x_valid), "test_samples": len(x_test),
+                   "valid_normal": int((y_valid == 0).sum()), "valid_anomaly": int((y_valid == 1).sum())}
+        self._bundle = {"x_valid": x_valid, "x_test": x_test,
+                        "valid_prediction": valid_prediction, "test_prediction": test_prediction,
+                        "valid_error": valid_error, "test_error": test_error,
+                        "y_valid": y_valid, "y_test": y_test, "summary": summary,
+                        "valid_metadata": self._artifact_evaluation_metadata(valid, config["gap_threshold_ms"], artifact.dataset_id),
+                        "test_metadata": self._artifact_evaluation_metadata(test, config["gap_threshold_ms"], artifact.dataset_id),
+                        "stage2_anomaly_segments": inventory_from_artifact(artifact),
+                        "stage2_test_batch": test, "stage2_sequence_length": config["sequence_length"]}
+        self._prediction_cache[key] = self._bundle
+        return {"cache_hit": False, **summary}
+
     def load_model_and_predictions(self, force=False):
+        data_mode = (getattr(self.model_run, "metadata", {}) or {}).get("data_mode", "KAMP_BASELINE")
+        if data_mode not in ("KAMP_BASELINE", "PROCESSED_DATASET"):
+            raise ValueError(f"Unsupported evaluation data_mode: {data_mode}")
+        if data_mode == "PROCESSED_DATASET":
+            return self._load_processed_predictions(force)
         key = self.cache_key()
         if not force and key in self._prediction_cache:
             self._bundle = self._prediction_cache[key]
@@ -219,7 +358,22 @@ class EvaluationController:
             "detection_delay_samples": delay_samples,
             "detection_delay_seconds": delay_seconds, "pareto": "",
         }
+        self._last_segment_details = []
+        if self._bundle.get("summary", {}).get("data_mode") == "PROCESSED_DATASET":
+            segment_metrics, self._last_segment_details = stage2_segment_detection_metrics(
+                self._bundle["stage2_anomaly_segments"], self._bundle["stage2_test_batch"],
+                prediction, self._bundle["stage2_sequence_length"])
+            result.update(segment_metrics)
         metadata = getattr(getattr(self, "model_run", None), "metadata", {})
+        saved_preprocessing = metadata.get("preprocessing")
+        if isinstance(saved_preprocessing, dict):
+            result.update({"preprocessing_mode": saved_preprocessing.get("mode", ""),
+                "dataset_id": metadata.get("dataset_id") or "",
+                **{key: saved_preprocessing.get(key, "") for key in
+                   ("sequence_length", "stride", "gap_threshold_ms", "signal_transform",
+                    "scaler", "use_horizon", "prediction_horizon")}})
+        if metadata.get("data_mode") == "PROCESSED_DATASET":
+            result["data_mode"] = "PROCESSED_DATASET"
         result.update({
             "status": metadata.get("model_status", self.model_spec.status),
             "experiment_name": metadata.get("experiment_name", ""), "seed": metadata.get("random_seed", ""),

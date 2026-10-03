@@ -71,7 +71,7 @@ class TrainingGraphTests(unittest.TestCase):
         from gui_app import MainWindow
         window = MainWindow(); window.show(); self.app.processEvents()
         self.assertEqual([window.tabs.tabText(i) for i in range(window.tabs.count())],
-                         ["실시간 학습", "학습 그래프", "데이터", "평가 및 비교"])
+                         ["데이터 전처리", "실시간 학습", "학습 그래프", "데이터", "평가 및 비교"])
         window.open_graph_button.click()
         self.assertIs(window.tabs.currentWidget(), window.graph_tab)
         self.assertEqual(window.graph_tab.run_type.currentData(), "current")

@@ -45,34 +45,41 @@ def prepare_fit_data(train_inputs, train_targets, validation_inputs, validation_
     dataset = dataset.map(noisy_batch, num_parallel_calls=1, deterministic=True)
     return dataset, None, valid_inputs, valid_targets
 
-def create_task_bundle(data, model_spec):
+def create_task_bundle(data, model_spec, sequence_length=None, prediction_horizon=None,
+                       gap_threshold_seconds=None):
+    sequence_length = core.SEQUENCE_LENGTH if sequence_length is None else sequence_length
+    prediction_horizon = core.PREDICTION_HORIZON if prediction_horizon is None else prediction_horizon
+    if type(sequence_length) is not int or sequence_length <= 0:
+        raise ValueError("sequence_length must be a positive integer")
+    if type(prediction_horizon) is not int or prediction_horizon < 0:
+        raise ValueError("prediction_horizon must be a non-negative integer")
     values = data[core.FEATURES].to_numpy(dtype=np.float32)
     labels = data[core.LABEL_COLUMN].to_numpy(dtype=int)
-    n = len(values) - core.SEQUENCE_LENGTH - core.PREDICTION_HORIZON
+    n = len(values) - sequence_length - prediction_horizon
     if n <= 0: raise ValueError("Not enough rows for sequence and horizon")
-    inputs = np.stack([values[i:i+core.SEQUENCE_LENGTH] for i in range(n)])
+    inputs = np.stack([values[i:i+sequence_length] for i in range(n)])
     if model_spec.task_type == "RECONSTRUCTION":
         targets = inputs.copy(); error_name = "Reconstruction Error"
     elif model_spec.task_type == "FORECAST":
         length = model_spec.forecast_length
-        targets = np.stack([values[i+core.SEQUENCE_LENGTH:i+core.SEQUENCE_LENGTH+length] for i in range(n)])
+        targets = np.stack([values[i+sequence_length:i+sequence_length+length] for i in range(n)])
         error_name = "Prediction Error"
     else: raise ValueError(f"Unknown task type: {model_spec.task_type}")
-    y = np.asarray([labels[i+core.SEQUENCE_LENGTH+core.PREDICTION_HORIZON] for i in range(n)], dtype=int)
+    y = np.asarray([labels[i+sequence_length+prediction_horizon] for i in range(n)], dtype=int)
     metadata = {}
     if core.TIMESTAMP_COLUMN in data.columns:
         import pandas as pd
         from score_postprocessing import detect_timestamp_segments
 
         timestamps = pd.to_datetime(data[core.TIMESTAMP_COLUMN], errors="raise")
-        row_segments, gap_threshold = detect_timestamp_segments(timestamps)
+        row_segments, gap_threshold = detect_timestamp_segments(timestamps, gap_threshold_seconds=gap_threshold_seconds) if gap_threshold_seconds is not None else detect_timestamp_segments(timestamps)
         row_segments = np.asarray(row_segments, dtype=np.int64)
-        label_rows = np.arange(n) + core.SEQUENCE_LENGTH + core.PREDICTION_HORIZON
+        label_rows = np.arange(n) + sequence_length + prediction_horizon
         # A gap belongs to the later row. Keep every existing window, including
         # those that cross a recording boundary, and mark it for evaluation.
         row_gaps = np.r_[False, row_segments[1:] != row_segments[:-1]]
         gap_prefix = np.r_[0, np.cumsum(row_gaps, dtype=np.int64)]
-        window_end = np.arange(n) + core.SEQUENCE_LENGTH
+        window_end = np.arange(n) + sequence_length
         window_gaps = gap_prefix[window_end] > gap_prefix[np.arange(n) + 1]
         metadata = {
             "sample_timestamps": timestamps.to_numpy()[label_rows],

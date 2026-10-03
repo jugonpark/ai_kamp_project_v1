@@ -163,14 +163,14 @@ def create_sequences(data, sequence_length=SEQUENCE_LENGTH):
                      for start in range(len(values) - sequence_length + 1)]).astype(np.float32)
 
 
-def build_model():
-    inputs = layers.Input(shape=(SEQUENCE_LENGTH, len(FEATURES)))
+def build_model(sequence_length=SEQUENCE_LENGTH, feature_count=len(FEATURES)):
+    inputs = layers.Input(shape=(sequence_length, feature_count))
     x = layers.LSTM(64, return_sequences=True)(inputs)
     x = layers.LSTM(32, return_sequences=False, name="latent_vector")(x)
-    x = layers.RepeatVector(SEQUENCE_LENGTH)(x)
+    x = layers.RepeatVector(sequence_length)(x)
     x = layers.LSTM(32, return_sequences=True)(x)
     x = layers.LSTM(64, return_sequences=True)(x)
-    outputs = layers.TimeDistributed(layers.Dense(len(FEATURES)))(x)
+    outputs = layers.TimeDistributed(layers.Dense(feature_count))(x)
     model = Model(inputs, outputs, name="kamp_lstm_autoencoder")
     model.compile(optimizer=optimizers.Adam(learning_rate=0.001), loss="mse")
     return model

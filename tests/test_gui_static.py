@@ -56,10 +56,10 @@ class EvaluationGuiTests(unittest.TestCase):
     def test_loss_graph_can_be_reset(self):
         from gui_app import MainWindow
         window = MainWindow()
-        window.loss_canvas.update_data(1, 0.2, 0.3)
+        self.assertFalse(hasattr(window, "loss_canvas"))
+        window.graph_tab.add_current_epoch(1, .2, .3, .001, 1, .3)
         window.reset_loss_graph()
-        self.assertEqual(len(window.loss_canvas.train_line.get_xdata()), 0)
-        self.assertEqual(len(window.loss_canvas.val_line.get_xdata()), 0)
+        self.assertFalse(window.graph_tab.current_curve.epochs)
         window.close()
 
     def test_full_training_controls_and_config_mapping_exist(self):
@@ -70,7 +70,7 @@ class EvaluationGuiTests(unittest.TestCase):
                     "early_stopping_enabled","early_stopping_patience","early_stopping_min_delta",
                     "restore_best_weights","noise_type","noise_mean","noise_std","noise_clip"}
         self.assertTrue(required.issubset(config))
-        self.assertEqual(window.comparison_table.columnCount(), 32)
+        self.assertEqual(window.comparison_table.columnCount(), 35)
         self.assertEqual(set(window.history_filters), {"Model","Status","Score","Threshold","Loss","Seed"})
         window.close()
 
@@ -148,7 +148,8 @@ class EvaluationGuiTests(unittest.TestCase):
     def test_training_controls_are_visible_and_scrollable_at_small_size(self):
         from gui_app import MainWindow
         from PySide6.QtWidgets import QScrollArea, QFormLayout
-        window = MainWindow(); window.resize(1200, 700); window.show(); self.app.processEvents()
+        window = MainWindow(); window.resize(1200, 700); window.show()
+        window.tabs.setCurrentIndex(window.tabs.indexOf(window.live_tab)); self.app.processEvents()
         self.assertIsInstance(window.training_scroll, QScrollArea)
         self.assertTrue(window.training_scroll.widgetResizable())
         self.assertGreater(window.training_scroll.verticalScrollBar().maximum(), 0)
@@ -233,7 +234,8 @@ class EvaluationGuiTests(unittest.TestCase):
 
     def test_cnn_kernel_selector_preview_preset_and_legacy_history(self):
         from gui_app import MainWindow
-        window = MainWindow(); window.show(); self.app.processEvents()
+        window = MainWindow(); window.show()
+        window.tabs.setCurrentIndex(window.tabs.indexOf(window.live_tab)); self.app.processEvents()
         self.assertEqual([window.cnn_kernel_combo.itemData(i) for i in range(window.cnn_kernel_combo.count())], [3, 5, 7])
         self.assertTrue(window.model_structure_box.isVisible())
         self.assertEqual(window._training_config_dict()["cnn_kernel_size"], 3)
@@ -298,7 +300,8 @@ class EvaluationGuiTests(unittest.TestCase):
 
     def test_cnn_architecture_controls_are_visible_and_drive_preview(self):
         from gui_app import MainWindow
-        window = MainWindow(); window.show(); self.app.processEvents()
+        window = MainWindow(); window.show()
+        window.tabs.setCurrentIndex(window.tabs.indexOf(window.live_tab)); self.app.processEvents()
         try:
             for combo in (window.cnn_filters_combo, window.bottleneck_combo):
                 self.assertEqual([combo.itemData(i) for i in range(combo.count())], [16, 32, 64])
@@ -455,7 +458,8 @@ class EvaluationGuiTests(unittest.TestCase):
 
     def test_boolean_controls_and_conditional_rows(self):
         from gui_app import MainWindow
-        window = MainWindow(); window.show(); self.app.processEvents()
+        window = MainWindow(); window.show()
+        window.tabs.setCurrentIndex(window.tabs.indexOf(window.live_tab)); self.app.processEvents()
         toggles = (window.reduce_lr_enabled, window.early_stopping_enabled, window.restore_best_weights, window.noise_clip_check)
         self.assertTrue(all(toggle.text() == "ON" for toggle in toggles))
         window.reduce_lr_enabled.setChecked(False)

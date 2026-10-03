@@ -51,6 +51,8 @@ TRAINING PARAMETERS에서 Epoch, Batch Size, Learning Rate, Optimizer, Loss,
 Random Seed를 수정하고 CALLBACK SETTINGS와 DENOISING SETTINGS를 확인합니다.
 화면 하단의 Current Experiment Summary와 START/STOP은 스크롤 위치와 관계없이
 표시됩니다. 좌우 폭은 구분선을 드래그해 조정할 수 있습니다.
+상단 탭은 `데이터 전처리` 다음에 `실시간 학습`이 옵니다. 실시간 학습 화면에는
+상태 수치와 로그를 표시하고, 손실 곡선은 별도의 `학습 그래프` 탭에서 봅니다.
 학습 중에는 모델, 파라미터, preset, 설정 불러오기와 초기화가 잠기며 종료 후 다시
 활성화됩니다. 숫자는 입력칸에 직접 입력하고 선택 항목은 콤보박스를 열어서
 변경합니다. 마우스 휠은 값을 바꾸지 않고 설정 영역을 스크롤합니다. 각 항목의
@@ -206,3 +208,95 @@ anomaly_detection_results.csv, metrics.json, run_summary.txt가 생성됩니다.
 - FULL_TRAINING_VERIFIED: 전체 학습을 실제로 끝까지 실행한 상태
 
 실행하지 않은 단계의 결과는 검증 완료로 간주하지 않습니다.
+
+KAMP BASELINE과 Stage 2 사용 안내
+===============================
+
+KAMP BASELINE
+-------------
+KAMP Guidebook reproduction 경로는 기존 설정을 유지합니다. 기본 Sequence 20,
+Horizon 100, 모든 센서의 ABS 변환, MinMax scaling, 기존 KAMP 평가 경로를
+사용합니다. 오래된 모델 메타데이터에 data_mode가 없어도 KAMP baseline으로
+불러옵니다. 이 경로의 결과 구조는 Stage 2 설정과 분리됩니다.
+
+Stage 2
+-------
+Stage 2는 데이터 품질을 고려한 이상 탐지 경로입니다. 처리 순서는 다음과 같습니다.
+
+    Raw CSV -> exact duplicate removal -> timestamp segmentation
+    -> segment split -> signal transform -> normal Train only scaler fit
+    -> segment-safe Observation Windows -> Processed Dataset artifact
+    -> Training -> Evaluation
+
+기존 row-based window는 기록이 중단된 timestamp gap을 넘을 수 있습니다.
+Stage 2는 Segment로 물리적 기록 연속성(physical recording continuity)을
+표현하고 한 Observation Window가 Segment 경계를 넘지 않도록 합니다.
+Segment는 하나의 연속 기록 구간이며 고장 발생 시점을 뜻하지 않습니다.
+Processed Dataset은 설정, 원본 파일 식별 정보, 분할, scaler, window 및
+timestamp metadata를 함께 저장한 재사용 가능한 artifact입니다.
+설정을 바꾼 현재 전처리 결과는 STALE이 되지만, 이미 저장한 artifact는
+수정되지 않으며 Training에서 다시 선택할 수 있습니다. Training과 Evaluation은
+선택한 artifact의 window와 설정을 사용합니다. GUI의 현재 전처리 입력값을
+저장된 artifact에 다시 적용하지 않습니다.
+
+Window-level Metric은 각 Observation Window의 Precision, Recall, F1, FP, FN을
+계산합니다. Segment-level Metric은 Artifact에 저장된 Test anomaly Segment
+전체를 대상으로 탐지 여부와 시점을 별도로 집계합니다. Window가 없는 짧은
+Segment는 NOT_EVALUABLE이며 Missed와 구분하고 Detection Rate 분모에서
+제외합니다. Segment Detection Rate는 Detected / Evaluable입니다.
+Segment-relative Detection Delay는 실제 Segment 첫 원본 sample 시각부터
+첫 alarm Window의 끝 시각까지의 시간입니다. 첫 evaluable Window의 끝 시각부터
+첫 alarm까지의 지연도 따로 표시합니다. 평균·중앙값·최댓값은 탐지된 Segment에만
+대해 계산합니다. Temporal NONE과 EWMA 모두 최종 prediction을 사용합니다.
+비교 CSV에는 Segment 집계가 저장되고, 단일 평가에서는 Segment별 상세 CSV도
+저장됩니다. 기존 KAMP의 detection_delay_samples/seconds는 관측된 label 전환이
+같은 연속 스트림 안에 있을 때의 별도 legacy 지표입니다.
+이 수치들은 실제 물리적 고장까지 남은 시간을 뜻하지 않습니다.
+
+GUI 실험 순서
+------------
+실제 실험과 모델 학습은 사용자가 GUI에서 직접 수행합니다.
+
+1. `데이터 전처리`에서 Stage 2 설정과 CSV를 선택합니다.
+2. `ANALYZE DATA`로 데이터 품질 및 Segment 개수를 확인합니다.
+3. `RUN PREPROCESSING` 후 cross-segment window가 0인지 확인합니다.
+4. Dataset ID를 정하고 `SAVE PROCESSED DATASET`을 누릅니다.
+5. `LIVE TRAINING`에서 DATA MODE를 `PROCESSED DATASET`으로 바꾸고 저장한
+   Dataset ID를 선택합니다. 화면의 Sequence, transform, scaler, gap이 저장
+   artifact와 같은지 확인한 뒤 사용자가 학습을 시작합니다.
+6. `EVALUATION`에서 저장 모델을 선택해 `LOAD MODEL`을 누릅니다.
+7. Score, Threshold, Temporal Processing(NONE/EWMA)을 고른 뒤 평가합니다.
+8. Window-level 결과와 Segment-level Detection 영역을 각각 확인합니다.
+9. 필요하면 Comparison CSV를 export합니다. 예전 CSV도 import할 수 있습니다.
+
+실험 계획
+---------
+처음 세 실험은 Sequence 20, Stride 1, Segment Gap Threshold 150 ms,
+Segment-aware ON, Use Horizon OFF, 동일한 데이터 분할·모델·seed·학습 설정,
+동일한 Score/Threshold, Temporal NONE(EWMA OFF)을 유지합니다.
+
+- Exp1: ABS ALL, MinMaxScaler, Seq20.
+- Exp2: RAW SIGNED, MinMaxScaler, Seq20.
+- Exp3: RAW SIGNED, StandardScaler, Seq20.
+
+Exp1~3 결과로 전처리 조건을 선택한 뒤 그 조건에서 Seq10, Seq15, Seq20을
+비교합니다. 최종 후보에는 Temporal NONE과 여러 EWMA alpha를 적용합니다.
+각 후보의 Precision, Recall, F1, FP, FN과 Segment Detection Rate,
+Median Segment-relative Detection Delay를 비교합니다. False Alarm,
+Miss, Detection Delay 사이의 trade-off를 함께 판단합니다. Test set을 반복해서
+튜닝하면 최종 성능 추정이 낙관적으로 변할 수 있습니다.
+
+프로그램은 실험 설정, 데이터 처리, 학습, 평가, 결과 기록을 지원합니다.
+최적 파라미터를 자동 선택하거나 최고의 모델을 자동 결정하지 않습니다.
+
+Known Limitations
+-----------------
+- Anomaly Segment는 검증된 물리적 고장 시작 시점이 아닙니다.
+- 현재 Stage 2는 anomaly/early detection이며, 검증된 미래 고장 예측은 아닙니다.
+- 현재 데이터에는 anomaly Segment가 21개뿐이므로 Segment-level 통계의
+  표본 크기가 작습니다. 실제 개수는 원본 CSV와 설정으로 다시 계산합니다.
+- 진정한 prediction horizon 검증에는 연속적인 열화 또는 run-to-failure 데이터가
+  필요합니다.
+- Segment-relative Detection Delay는 anomaly Segment 시작 기준 탐지 지연시간이며
+  물리적 failure lead time이 아닙니다. 기존 detection_delay_samples/seconds는
+  관측 가능한 label 전환에서만 계산되는 별도 legacy 지표입니다.

@@ -8,6 +8,7 @@ import tensorflow as tf
 import train_lstm_ae as core
 import plot_utils
 from model_registry import MODEL_REGISTRY
+from preprocessing_config import default_preprocessing_config, validate_preprocessing_config
 
 RUNS_ROOT = core.OUTPUT_DIR / "models"
 
@@ -21,6 +22,8 @@ TEMPORAL_RESULT_FIELDS = (
     "best_epoch", "best_val_loss", "training_time", "created_at", "temporal_method",
     "ewma_alpha", "timestamp_aware", "timestamp_gap_threshold", "total_error",
     "detection_delay_samples", "detection_delay_seconds", "pareto", "evaluated_at",
+    "preprocessing_mode", "dataset_id", "sequence_length", "stride", "gap_threshold_ms",
+    "signal_transform", "scaler", "use_horizon", "prediction_horizon",
 )
 
 @dataclass(frozen=True)
@@ -46,7 +49,16 @@ def discover_model_runs(model_id):
         if legacy.is_file(): runs.append(ModelRun(model_id, "LEGACY_KAMP", legacy, {"model_id":model_id,"task_type":spec.task_type,"forecast_length":0,"legacy":True,"noise_generation":"none"}))
     return runs
 
-def save_model_run(model, history, spec, training_info):
+def save_model_run(model, history, spec, training_info, preprocessing_config=None,
+                   requested_preprocessing_config=None):
+    effective_preprocessing = validate_preprocessing_config(
+        preprocessing_config if preprocessing_config is not None else default_preprocessing_config("KAMP_BASELINE"))
+    requested_preprocessing = (validate_preprocessing_config(requested_preprocessing_config)
+                               if requested_preprocessing_config is not None else None)
+    model_input_shape = getattr(model, "input_shape", None)
+    expected_input_shape = (effective_preprocessing["sequence_length"], len(core.FEATURES))
+    if model_input_shape is not None and tuple(model_input_shape[1:]) != expected_input_shape:
+        raise ValueError(f"Model input shape {model_input_shape[1:]} does not match preprocessing {expected_input_shape}")
     created = datetime.now(); run_dir = RUNS_ROOT / spec.id / created.strftime("%Y%m%d_%H%M%S_%f")
     run_dir.mkdir(parents=True, exist_ok=False)
     model_path = run_dir / "model.keras"; model.save(model_path)
@@ -61,11 +73,14 @@ def save_model_run(model, history, spec, training_info):
         best_loss = float(val[best-1]) if best else None
     metadata = {"model_id":spec.id,"model_status":spec.status,"display_name":spec.display_name,"task_type":spec.task_type,
         "created_at":created.isoformat(),"python_version":platform.python_version(),"tensorflow_version":tf.__version__,
-        "sequence_length":core.SEQUENCE_LENGTH,"prediction_horizon":core.PREDICTION_HORIZON,
+        "sequence_length":effective_preprocessing["sequence_length"],"prediction_horizon":effective_preprocessing["prediction_horizon"],
         "cnn_kernel_size":training_info.get("cnn_kernel_size", 3) if "CNN_LSTM" in spec.id else None,
         "cnn_filters":training_info.get("cnn_filters", 32) if "CNN_LSTM" in spec.id else None,
         "bottleneck_units":training_info.get("bottleneck_units", 32) if "CNN_LSTM" in spec.id else None,
-        "forecast_length":spec.forecast_length,"features":core.FEATURES,"preprocessing":"abs + train-only MinMaxScaler",
+        "forecast_length":spec.forecast_length,"features":core.FEATURES,"preprocessing":effective_preprocessing,
+        "preprocessing_description":"abs + train-only MinMaxScaler" if effective_preprocessing["mode"] == "KAMP_BASELINE" else "configured Stage 2 preprocessing",
+        "requested_preprocessing":requested_preprocessing,
+        "dataset_id":training_info.get("dataset_id"),
         "compatible_score_methods":list(spec.compatible_score_methods),
         "optimizer":training_info.get("optimizer", "Adam"),"learning_rate":training_info.get("learning_rate", 0.001),"batch_size":training_info.get("batch_size", core.BATCH_SIZE),
         "weight_decay":training_info.get("weight_decay", 0.0001), "huber_delta":training_info.get("huber_delta", 1.0),
@@ -88,6 +103,16 @@ def save_model_run(model, history, spec, training_info):
                      "restore_best_weights":training_info.get("restore_best_weights", True)}},
         "training_duration_seconds":training_info.get("training_duration_seconds"),
         "split":"KAMP Guidebook-compatible; future STRICT_TIME_SPLIT validation required"}
+    if training_info.get("data_mode") == "PROCESSED_DATASET":
+        metadata.update({key: training_info[key] for key in (
+            "data_mode", "processed_dataset_path", "dataset_config_sha256", "source_csv_sha256")})
+        metadata["split"] = "Processed Dataset artifact: chronological whole segments"
+        metadata["artifact_windows"] = {"train": training_info["train_sequences"],
+                                        "validation": training_info["valid_samples"],
+                                        "test": training_info["test_samples"]}
+        metadata.update({key: effective_preprocessing[key] for key in (
+            "stride", "gap_threshold_ms", "signal_transform", "scaler",
+            "remove_exact_duplicates", "segment_aware", "use_horizon")})
     (run_dir / "metadata.json").write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
     summary = {key: metadata[key] for key in ("model_id", "model_status", "experiment_name", "created_at", "random_seed",
                "optimizer", "learning_rate", "loss", "batch_size", "cnn_filters", "cnn_kernel_size", "bottleneck_units", "requested_epochs", "completed_epochs",
@@ -99,6 +124,16 @@ def save_model_run(model, history, spec, training_info):
 def append_evaluation_result(model_run, result):
     """Append one independently calibrated evaluation without overwriting history."""
     row = {**result, "evaluated_at": datetime.now().isoformat()}
+    run_metadata = getattr(model_run, "metadata", {}) or {}
+    preprocessing = run_metadata.get("preprocessing")
+    if isinstance(preprocessing, dict):
+        if run_metadata.get("data_mode") == "PROCESSED_DATASET":
+            row.setdefault("data_mode", "PROCESSED_DATASET")
+        row.setdefault("preprocessing_mode", preprocessing.get("mode", ""))
+        row.setdefault("dataset_id", run_metadata.get("dataset_id") or "")
+        for key in ("sequence_length", "stride", "gap_threshold_ms", "signal_transform",
+                    "scaler", "use_horizon", "prediction_horizon"):
+            row.setdefault(key, preprocessing.get(key, ""))
     if "temporal_method" in row:
         path = model_run.model_path.parent / "evaluation_results_v2.csv"
         fields = list(TEMPORAL_RESULT_FIELDS)

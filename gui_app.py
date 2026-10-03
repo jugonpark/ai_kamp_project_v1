@@ -24,12 +24,15 @@ from evaluation_controller import EvaluationController
 from evaluation_worker import EvaluationWorker
 from model_registry import MODEL_REGISTRY
 from model_artifacts import discover_model_runs, append_evaluation_result
+from stage2.segment_detection import METRIC_KEYS, save_segment_detail_csv
 from training_graph import TrainingGraphTab
+from preprocessing_worker import PreprocessingWorker
+from stage2.dataset_artifacts import (save_processed_dataset, validate_dataset_id,
+    discover_processed_datasets, load_processed_dataset)
 from gui_help import PARAMETER_HELP, format_parameter_help
 from training_config import load_training_config as load_config_file, save_training_config as save_config_file, validate_training_config
-from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
-from matplotlib.figure import Figure
-from matplotlib.font_manager import FontProperties
+from preprocessing_config import (DEFAULT_CONFIG_DIR, default_preprocessing_config,
+    validate_preprocessing_config, save_preprocessing_config, load_preprocessing_config)
 
 
 def architecture_signature(result):
@@ -44,43 +47,6 @@ def architecture_signature(result):
             return "unknown"
         values.append(number)
     return f"F{values[0]}-K{values[1]}-B{values[2]}"
-
-
-class LossCanvas(FigureCanvas):
-    def __init__(self, parent=None):
-        self.figure = Figure(figsize=(7, 4), tight_layout=True)
-        super().__init__(self.figure)
-        self.axis = self.figure.add_subplot(111)
-        korean_font = FontProperties(fname=r"C:\Windows\Fonts\malgun.ttf") if Path(r"C:\Windows\Fonts\malgun.ttf").is_file() else None
-        self.axis.set_title("학습 손실", fontproperties=korean_font)
-        self.axis.set_xlabel("에포크", fontproperties=korean_font)
-        self.axis.set_ylabel("MSE 손실", fontproperties=korean_font)
-        self.train_line, = self.axis.plot([], [], label="학습 손실")
-        self.val_line, = self.axis.plot([], [], label="검증 손실")
-        self.axis.legend(prop=korean_font)
-        self.best_marker = None
-        self.lr_markers = []
-
-    def update_data(self, epoch, loss, val_loss):
-        train_x = list(self.train_line.get_xdata()) + [epoch]
-        train_y = list(self.train_line.get_ydata()) + [loss]
-        val_y = list(self.val_line.get_ydata()) + [val_loss]
-        self.train_line.set_data(train_x, train_y)
-        self.val_line.set_data(train_x, val_y)
-        self.axis.relim(); self.axis.autoscale_view(); self.draw_idle()
-
-    def clear_data(self):
-        self.train_line.set_data([], [])
-        self.val_line.set_data([], [])
-        if self.best_marker: self.best_marker.remove(); self.best_marker = None
-        for marker in self.lr_markers: marker.remove()
-        self.lr_markers.clear(); self.axis.relim(); self.axis.autoscale_view(); self.draw_idle()
-
-    def update_markers(self, best_epoch, lr_reduced=False):
-        if self.best_marker: self.best_marker.remove()
-        self.best_marker = self.axis.axvline(best_epoch, color="green", linestyle="--", alpha=.7)
-        if lr_reduced: self.lr_markers.append(self.axis.axvline(len(self.train_line.get_xdata()), color="orange", linestyle=":"))
-        self.draw_idle()
 
 
 class MainWindow(QMainWindow):
@@ -106,6 +72,19 @@ class MainWindow(QMainWindow):
         self.comparison_history = []
         self.baseline_result = None
         self.champion_result = None
+        self.preprocessing_config = default_preprocessing_config()
+        self.stage2_preprocessing_result = None
+        self.stage2_saved_dataset = None
+        self._selected_processed_artifact = None
+        self.stage2_preprocessing_config_snapshot = None
+        self.stage2_preprocessing_paths_snapshot = None
+        self.stage2_analysis_snapshot = None
+        self.preprocessing_thread = None
+        self.preprocessing_worker = None
+        self._stage2_busy = False
+        self._training_locked = False
+        self._stage2_training_dataset = None
+        self._stage2_dataset_summary = None
         self._build_ui()
         self._log("Application started")
 
@@ -115,7 +94,7 @@ class MainWindow(QMainWindow):
         header.setObjectName("header"); outer.addWidget(header)
         self.status_label = QLabel("선택한 모델: CNN_LSTM_AUTOENCODER    상태: 준비")
         outer.addWidget(self.status_label)
-        tabs = QTabWidget(); self.tabs = tabs; live = QWidget(); live_layout = QHBoxLayout(live)
+        tabs = QTabWidget(); self.tabs = tabs; live = QWidget(); self.live_tab = live; live_layout = QHBoxLayout(live)
         self.live_splitter = QSplitter(Qt.Horizontal)
         left_container = QWidget(); left_layout = QVBoxLayout(left_container)
         left_container.setMinimumWidth(420)
@@ -127,14 +106,15 @@ class MainWindow(QMainWindow):
         self.training_scroll.setWidget(settings_content)
         left_layout.addWidget(self.training_scroll, 1)
         right_container = QWidget(); right_layout = QVBoxLayout(right_container)
-        right_splitter = QSplitter(Qt.Vertical)
         system = QGroupBox("시스템 / 데이터 상태"); system_form = QFormLayout(system)
         self.system_labels = {}
         for key, value in (("Python", platform.python_version()), ("TensorFlow", tf.__version__),
                            ("OS", platform.platform()), ("Device", "CPU"), ("GPU", "Not used"),
-                           ("Sequence", "20"), ("Horizon", "100"), ("Input", "(20, 3)")):
+                           ("Mode", ""), ("Dataset", "-"), ("Segment Gap", ""), ("Signal Transform", ""),
+                           ("Scaler", ""), ("Sequence", ""), ("Stride", ""),
+                           ("Horizon", ""), ("Input Shape", ""), ("Preprocessing Status", "NOT RUN")):
             label = QLabel(value); self.system_labels[key] = label; system_form.addRow(key, label)
-        system.setMaximumHeight(175)
+        system.setMaximumHeight(230)
         right_layout.addWidget(system)
         monitor = QGroupBox("학습 상태"); monitor_form = QFormLayout(monitor)
         self.monitor_labels = {}
@@ -142,20 +122,36 @@ class MainWindow(QMainWindow):
         for key in ("Model", "Experiment Name", "Epoch", "Train Loss", "Validation Loss", "Best Epoch", "Best Val Loss", "Generalization Gap", "Learning Rate", "Elapsed", "EarlyStopping", "ReduceLR", "Optimizer", "Loss", "Batch Size", "Noise Std"):
             label = QLabel("-"); self.monitor_labels[key] = label; monitor_form.addRow(monitor_names[key], label)
         self.progress = QProgressBar(); monitor_form.addRow("진행률", self.progress)
-        right_splitter.addWidget(monitor)
-        graph_box = QWidget(); graph_layout = QVBoxLayout(graph_box)
-        self.loss_canvas = LossCanvas(); graph_layout.addWidget(self.loss_canvas, 3)
+        right_layout.addWidget(monitor)
         self.log_view = QPlainTextEdit(); self.log_view.setReadOnly(True); self.log_view.setMaximumBlockCount(1000)
-        graph_layout.addWidget(self.log_view, 1)
-        right_splitter.addWidget(graph_box); right_splitter.setSizes([300, 500])
-        right_layout.addWidget(right_splitter)
+        right_layout.addWidget(self.log_view, 1)
         model_box = QGroupBox("모델 설정"); model_layout = QVBoxLayout(model_box)
+        data_mode_row = QHBoxLayout()
+        self.data_mode_combo = QComboBox()
+        self.data_mode_combo.addItem("KAMP BASELINE", "KAMP_BASELINE")
+        self.data_mode_combo.addItem("PROCESSED DATASET", "PROCESSED_DATASET")
+        data_mode_row.addWidget(QLabel("DATA MODE")); data_mode_row.addWidget(self.data_mode_combo, 1)
+        model_layout.addLayout(data_mode_row)
+        dataset_row = QHBoxLayout()
+        self.processed_dataset_combo = QComboBox()
+        self.refresh_processed_datasets_button = QPushButton("Refresh")
+        dataset_row.addWidget(QLabel("Processed Dataset")); dataset_row.addWidget(self.processed_dataset_combo, 1)
+        dataset_row.addWidget(self.refresh_processed_datasets_button)
+        model_layout.addLayout(dataset_row)
+        self.processed_dataset_summary_label = QLabel("KAMP baseline data path")
+        self.processed_dataset_summary_label.setWordWrap(True)
+        model_layout.addWidget(self.processed_dataset_summary_label)
         self.training_model_combo = QComboBox()
         for spec in MODEL_REGISTRY.values():
             if spec.status == "ACTIVE": self.training_model_combo.addItem(spec.display_name, spec.id)
         self.training_model_combo.setCurrentIndex(self.training_model_combo.findData("CNN_LSTM_AUTOENCODER"))
         self.training_model_combo.currentIndexChanged.connect(self.update_training_model)
         model_layout.addWidget(QLabel("학습 모델")); model_layout.addWidget(self.training_model_combo)
+        self.data_mode_combo.currentIndexChanged.connect(self._data_mode_changed)
+        self.processed_dataset_combo.currentIndexChanged.connect(self._processed_dataset_changed)
+        self.refresh_processed_datasets_button.clicked.connect(self.refresh_processed_datasets)
+        self.processed_dataset_combo.setEnabled(False)
+        self.refresh_processed_datasets_button.setEnabled(False)
         settings_layout.addWidget(model_box)
         training_box = QGroupBox("학습 파라미터"); training_form = QFormLayout(training_box)
         callback_box = QGroupBox("자동 학습 제어"); callback_form = QFormLayout(callback_box)
@@ -254,7 +250,9 @@ class MainWindow(QMainWindow):
         self.training_model_combo.installEventFilter(self)
         self._wheel_protected_widgets = {self.preset_combo, self.training_model_combo, *editable}
         self._wheel_protected_widgets.update(widget.lineEdit() for widget in editable if isinstance(widget, QAbstractSpinBox))
-        self._training_editable_widgets = [self.training_model_combo, self.preset_combo, self.experiment_name_edit, *editable,
+        self._training_editable_widgets = [self.data_mode_combo, self.processed_dataset_combo,
+                                           self.refresh_processed_datasets_button,
+                                           self.training_model_combo, self.preset_combo, self.experiment_name_edit, *editable,
                                            self.reset_config_button, self.load_config_button]
         self.experiment_name_edit.textChanged.connect(self._update_experiment_summary)
         self.preset_combo.currentTextChanged.connect(self._update_experiment_summary)
@@ -278,6 +276,7 @@ class MainWindow(QMainWindow):
         left_layout.addLayout(utility_controls)
         self.live_splitter.addWidget(left_container); self.live_splitter.addWidget(right_container)
         self.live_splitter.setSizes([480, 800]); live_layout.addWidget(self.live_splitter)
+        self._build_preprocessing_tab(tabs)
         tabs.addTab(live, "실시간 학습")
         self.graph_tab = TrainingGraphTab()
         tabs.addTab(self.graph_tab, "학습 그래프")
@@ -322,6 +321,11 @@ class MainWindow(QMainWindow):
         selector_form.addRow("시간축 점수 처리", self.temporal_combo)
         selector_form.addRow("EWMA α", self.ewma_alpha_spin)
         selector_form.addRow("Timestamp 연속성 고려", self.timestamp_aware_check)
+        self.evaluation_gap_label = QLabel()
+        selector_form.addRow("Segment Gap Threshold", self.evaluation_gap_label)
+        self.evaluation_dataset_label = QLabel("DATA MODE: KAMP BASELINE")
+        self.evaluation_dataset_label.setWordWrap(True)
+        selector_form.addRow("평가 데이터", self.evaluation_dataset_label)
         selector_form.addRow("임계값 방식", self.threshold_combo)
         self.eval_status_label = QLabel("모델: LSTM AutoEncoder    점수: 마지막 시점 MSE    임계값: 정밀도-재현율 균형점    상태: 미불러옴")
         self.eval_status_label.setWordWrap(True)
@@ -361,6 +365,27 @@ class MainWindow(QMainWindow):
             label = QLabel("-"); self.eval_result_labels[key] = label
             result_layout.addWidget(QLabel(metric_names[key]), index // 2, (index % 2) * 2); result_layout.addWidget(label, index // 2, (index % 2) * 2 + 1)
         results_layout.addWidget(result_box)
+        segment_box = QGroupBox("Segment-level Detection / Segment-relative Detection Delay (seconds)")
+        segment_layout = QGridLayout(segment_box)
+        self.segment_result_labels = {}
+        segment_names = (
+            ("anomaly_segments_total", "Anomaly Test Segments"),
+            ("evaluable_anomaly_segments", "Evaluable Segments"),
+            ("non_evaluable_anomaly_segments", "Non-evaluable Segments"),
+            ("detected_segments", "Detected Segments"), ("missed_segments", "Missed Segments"),
+            ("segment_detection_rate", "Segment Detection Rate"),
+            ("mean_segment_delay_seconds", "Mean Delay From Start (seconds)"),
+            ("median_segment_delay_seconds", "Median Delay From Start (seconds)"),
+            ("max_segment_delay_seconds", "Max Delay From Start (seconds)"),
+            ("mean_post_evaluable_delay_seconds", "Mean Delay After Evaluable (seconds)"),
+            ("median_post_evaluable_delay_seconds", "Median Delay After Evaluable (seconds)"),
+            ("max_post_evaluable_delay_seconds", "Max Delay After Evaluable (seconds)"),
+        )
+        for index, (key, title) in enumerate(segment_names):
+            label = QLabel("-"); self.segment_result_labels[key] = label
+            segment_layout.addWidget(QLabel(title), index // 2, (index % 2) * 2)
+            segment_layout.addWidget(label, index // 2, (index % 2) * 2 + 1)
+        results_layout.addWidget(segment_box)
         self.comparison_summary_label = QLabel("현재 최고 실험: 없음\n기준 실험: 없음"); self.comparison_summary_label.setWordWrap(True); results_layout.addWidget(self.comparison_summary_label)
         history_box = QGroupBox("실험 기록"); history_layout = QVBoxLayout(history_box)
         self.history_filters = {}
@@ -369,18 +394,528 @@ class MainWindow(QMainWindow):
             combo = QComboBox(); combo.addItem("전체", "ALL"); combo.currentIndexChanged.connect(self.apply_history_filters); self.history_filters[name] = combo
             filter_layout.addWidget(QLabel({"Model":"모델", "Status":"상태", "Score":"점수", "Threshold":"임계값 방식", "Loss":"손실 함수", "Seed":"시드"}[name])); filter_layout.addWidget(combo)
         history_layout.addLayout(filter_layout)
-        columns = ["상태", "모델", "실험", "Architecture", "시드", "최적화", "학습률", "손실 함수", "배치", "노이즈 표준편차", "점수", "임계값 방식", "임계값", "정확도", "균형 정확도", "정밀도", "재현율", "F1", "정상 정확 판정 (TN)", "오경보 (FP)", "미탐 (FN)", "이상 정확 탐지 (TP)", "최적 에포크", "최적 검증 손실", "학습 시간", "생성 시각", "Temporal", "Alpha", "Timestamp Reset", "Total Error", "Delay", "Pareto"]
+        columns = ["상태", "모델", "실험", "Architecture", "시드", "최적화", "학습률", "손실 함수", "배치", "노이즈 표준편차", "점수", "임계값 방식", "임계값", "정확도", "균형 정확도", "정밀도", "재현율", "F1", "정상 정확 판정 (TN)", "오경보 (FP)", "미탐 (FN)", "이상 정확 탐지 (TP)", "최적 에포크", "최적 검증 손실", "학습 시간", "생성 시각", "Temporal", "Alpha", "Timestamp Reset", "Total Error", "Delay", "Pareto", "Sequence", "Segment Detection Rate", "Median Segment-relative Delay (seconds)"]
         self.comparison_table = QTableWidget(0, len(columns)); self.comparison_table.setHorizontalHeaderLabels(columns)
         history_layout.addWidget(self.comparison_table); results_layout.addWidget(history_box, 1)
         self.delta_comparison_label = QLabel("기준 실험과 현재 실험을 선택하면 차이를 표시합니다."); self.delta_comparison_label.setWordWrap(True); results_layout.addWidget(self.delta_comparison_label)
         self.confusion_comparison_label = QLabel("기준 혼동행렬: -    선택한 혼동행렬: -"); results_layout.addWidget(self.confusion_comparison_label)
         warning = QLabel("Test 지표는 최종 성능 확인용입니다. Test F1을 반복해서 보고 파라미터를 고르면 Test 데이터에 간접 과적합될 수 있습니다. 현재 분할은 KAMP 호환 방식이며 STRICT_TIME_SPLIT 검증이 추가로 필요합니다. 같은 시드를 써도 환경에 따라 완전히 같은 결과는 보장되지 않습니다.\n다음 권장 실험: Denoising CNN-LSTM에서 CNN 기준과 같은 시드·설정을 유지하고 Gaussian 노이즈 표준편차만 0.01로 변경하세요. MAHALANOBIS_ERROR + POT_1PCT 방식으로 비교하되 각 모델의 임계값 숫자는 검증 데이터에서 따로 계산합니다."); warning.setWordWrap(True); results_layout.addWidget(warning)
-        tabs.addTab(eval_tab, "평가 및 비교"); self.update_training_model(); self.refresh_evaluation_runs(); self.update_algorithm_description()
+        tabs.addTab(eval_tab, "평가 및 비교"); self._refresh_preprocessing_display(); self.update_training_model(); self.refresh_evaluation_runs(); self.update_algorithm_description()
         outer.addWidget(tabs, 1)
         self.setCentralWidget(root)
         self.setStyleSheet("QMainWindow,QWidget{background:#111820;color:#e7eef5} QGroupBox{background:#16222d;border:1px solid #36536b;margin-top:8px;padding:8px} QGroupBox::title{color:#78c7e8} QLabel,QCheckBox{background:transparent;color:#e7eef5} QLineEdit,QSpinBox,QDoubleSpinBox,QComboBox{background:#1d2d3b;color:#e7eef5;border:1px solid #4b7087;padding:3px;min-height:22px} QComboBox QAbstractItemView{background:#1d2d3b;color:#e7eef5} QScrollArea{background:#111820;border:0} QScrollBar:vertical{background:#14222e;width:12px} QScrollBar::handle:vertical{background:#52758a;min-height:24px} #header{font-size:22px;font-weight:bold;color:#8ad8f5;padding:8px} #experimentSummary{background:#203645;padding:8px;border:1px solid #4b7087} QPlainTextEdit{background:#0b1117;color:#e7eef5;font-family:Consolas} QPushButton{padding:8px;background:#1e536d;color:#e7eef5;border:1px solid #54a7c6}")
 
     def _log(self, message): self.log_view.appendPlainText(message)
+
+    def _build_preprocessing_tab(self, tabs):
+        page = QWidget(); layout = QVBoxLayout(page)
+        self.preprocessing_widgets = []
+        source_box = QGroupBox("데이터 원본"); source_form = QFormLayout(source_box)
+        self.normal_csv_edit = QLineEdit(str(core.NORMAL_PATH))
+        self.anomaly_csv_edit = QLineEdit(str(core.OUTLIER_PATH))
+        self.normal_csv_browse = QPushButton("찾아보기")
+        self.anomaly_csv_browse = QPushButton("찾아보기")
+        self.normal_csv_browse.clicked.connect(lambda: self._browse_stage2_csv(self.normal_csv_edit))
+        self.anomaly_csv_browse.clicked.connect(lambda: self._browse_stage2_csv(self.anomaly_csv_edit))
+        for label, edit, button in (("정상 데이터 CSV", self.normal_csv_edit, self.normal_csv_browse),
+                                    ("이상 데이터 CSV", self.anomaly_csv_edit, self.anomaly_csv_browse)):
+            row = QWidget(); row_layout = QHBoxLayout(row); row_layout.setContentsMargins(0, 0, 0, 0)
+            row_layout.addWidget(edit, 1); row_layout.addWidget(button)
+            source_form.addRow(label, row)
+        self.preprocessing_widgets.extend((self.normal_csv_edit, self.anomaly_csv_edit,
+                                           self.normal_csv_browse, self.anomaly_csv_browse))
+        layout.addWidget(source_box)
+        mode_box = QGroupBox("전처리 모드"); mode_form = QFormLayout(mode_box)
+        self.preprocessing_mode_combo = QComboBox()
+        self.preprocessing_mode_combo.addItem("Stage 2 구간 인식", "STAGE2_SEGMENT_AWARE")
+        self.preprocessing_mode_combo.addItem("KAMP 기준선 (고정)", "KAMP_BASELINE")
+        mode_form.addRow("모드", self.preprocessing_mode_combo)
+        layout.addWidget(mode_box)
+        self.preprocessing_widgets.append(self.preprocessing_mode_combo)
+        time_box = QGroupBox("시간축"); time_form = QFormLayout(time_box)
+        self.expected_interval_spin = QSpinBox(); self.expected_interval_spin.setRange(1, 100000); self.expected_interval_spin.setSuffix(" ms")
+        self.gap_threshold_spin = QSpinBox(); self.gap_threshold_spin.setRange(2, 100000); self.gap_threshold_spin.setSuffix(" ms")
+        self.remove_duplicates_check = QCheckBox("사용")
+        self.segment_aware_check = QCheckBox("사용")
+        for label, widget in (("예상 측정 간격", self.expected_interval_spin), ("기록 구간 분리 기준", self.gap_threshold_spin),
+                              ("완전 중복 행 제거", self.remove_duplicates_check), ("구간 인식 전처리", self.segment_aware_check)):
+            time_form.addRow(label, widget); self.preprocessing_widgets.append(widget)
+        layout.addWidget(time_box)
+        signal_box = QGroupBox("신호 변환 및 스케일링"); signal_form = QFormLayout(signal_box)
+        self.signal_transform_combo = QComboBox()
+        for label, value in (("전체 절댓값", "ABS_ALL"), ("원본 부호 유지", "RAW_SIGNED"),
+                             ("진동 절댓값 + 전류 원본", "ABS_VIBRATION_RAW_CURRENT")):
+            self.signal_transform_combo.addItem(label, value)
+        self.scaler_combo = QComboBox()
+        for label, value in (("최소·최대 스케일링", "MINMAX"), ("표준화", "STANDARD")):
+            self.scaler_combo.addItem(label, value)
+        signal_form.addRow("신호 변환", self.signal_transform_combo)
+        signal_form.addRow("스케일링", self.scaler_combo)
+        signal_form.addRow("스케일러 학습 데이터", QLabel("정상 학습 데이터만"))
+        self.preprocessing_widgets.extend((self.signal_transform_combo, self.scaler_combo))
+        layout.addWidget(signal_box)
+        window_box = QGroupBox("관측 윈도우"); window_form = QFormLayout(window_box)
+        self.sequence_combo = QComboBox()
+        for length in (10, 15, 20): self.sequence_combo.addItem(str(length), length)
+        self.stride_spin = QSpinBox(); self.stride_spin.setRange(1, 100000)
+        self.use_horizon_check = QCheckBox("사용 안 함")
+        self.baseline_horizon_spin = QSpinBox(); self.baseline_horizon_spin.setRange(1, 100000)
+        for label, widget in (("시퀀스 길이", self.sequence_combo), ("이동 간격", self.stride_spin),
+                              ("예측 간격 사용", self.use_horizon_check), ("KAMP 기준 예측 간격", self.baseline_horizon_spin)):
+            window_form.addRow(label, widget)
+        self.preprocessing_widgets.extend((self.sequence_combo, self.stride_spin, self.use_horizon_check, self.baseline_horizon_spin))
+        layout.addWidget(window_box)
+        segments_box = QGroupBox("기록 구간 분석"); segments_form = QFormLayout(segments_box)
+        self.normal_segments_label = QLabel("-"); self.anomaly_segments_label = QLabel("-")
+        segments_form.addRow("정상 구간 수", self.normal_segments_label)
+        segments_form.addRow("이상 구간 수", self.anomaly_segments_label)
+        layout.addWidget(segments_box)
+        self.analyze_data_button = QPushButton("데이터 분석")
+        self.analyze_data_button.clicked.connect(lambda: self._start_stage2_action("analyze"))
+        self.run_preprocessing_button = QPushButton("전처리 실행")
+        self.run_preprocessing_button.clicked.connect(lambda: self._start_stage2_action("preprocess"))
+        execution = QHBoxLayout(); execution.addWidget(self.analyze_data_button); execution.addWidget(self.run_preprocessing_button)
+        layout.addLayout(execution)
+        self.preprocessing_widgets.extend((self.analyze_data_button, self.run_preprocessing_button))
+        self.stage2_status_label = QLabel("준비")
+        layout.addWidget(self.stage2_status_label)
+        self.stage2_cross_gap_label = QLabel("구간 경계 횡단 윈도우: -")
+        self.stage2_cross_gap_label.setStyleSheet("font-weight:bold;color:#8ad8f5")
+        self.stage2_total_windows_label = QLabel("전체 윈도우 (정상 / 이상): - / -")
+        layout.addWidget(self.stage2_cross_gap_label)
+        layout.addWidget(self.stage2_total_windows_label)
+        analysis_box = QGroupBox("데이터 품질 분석"); analysis_layout = QVBoxLayout(analysis_box)
+        self.stage2_analysis_text = QPlainTextEdit(); self.stage2_analysis_text.setReadOnly(True)
+        self.stage2_analysis_text.setPlainText("데이터 분석을 실행하세요.")
+        self.stage2_analysis_text.setMinimumHeight(160)
+        analysis_layout.addWidget(self.stage2_analysis_text); layout.addWidget(analysis_box)
+        preview_box = QGroupBox("전처리 결과 미리보기"); preview_layout = QVBoxLayout(preview_box)
+        self.stage2_preview_text = QPlainTextEdit(); self.stage2_preview_text.setReadOnly(True)
+        self.stage2_preview_text.setPlainText("전처리를 실행하세요.")
+        self.stage2_preview_text.setMinimumHeight(230)
+        preview_layout.addWidget(self.stage2_preview_text); layout.addWidget(preview_box)
+        dataset_box = QGroupBox("처리된 데이터셋 저장"); dataset_form = QFormLayout(dataset_box)
+        self._suggested_dataset_id = "stage2_abs_minmax_seq20_gap150"
+        self.dataset_id_edit = QLineEdit(self._suggested_dataset_id)
+        self.dataset_id_edit.setPlaceholderText("영문자, 숫자, _, -")
+        self.save_processed_dataset_button = QPushButton("처리된 데이터셋 저장")
+        self.save_processed_dataset_button.setEnabled(False)
+        self.save_processed_dataset_button.clicked.connect(self._save_processed_dataset)
+        self.stage2_saved_dataset_label = QLabel("저장된 데이터셋: -")
+        self.stage2_saved_dataset_label.setWordWrap(True)
+        dataset_form.addRow("데이터셋 ID", self.dataset_id_edit)
+        dataset_form.addRow(self.save_processed_dataset_button)
+        dataset_form.addRow(self.stage2_saved_dataset_label)
+        layout.addWidget(dataset_box)
+        self.preprocessing_widgets.append(self.dataset_id_edit)
+        self.dataset_id_edit.textChanged.connect(self._refresh_stage2_save_enabled)
+        actions = QHBoxLayout()
+        self.save_preprocessing_button = QPushButton("전처리 설정 저장"); self.save_preprocessing_button.clicked.connect(self.save_preprocessing_settings)
+        self.load_preprocessing_button = QPushButton("전처리 설정 불러오기"); self.load_preprocessing_button.clicked.connect(self.load_preprocessing_settings)
+        actions.addWidget(self.save_preprocessing_button); actions.addWidget(self.load_preprocessing_button)
+        self.preprocessing_widgets.extend((self.save_preprocessing_button, self.load_preprocessing_button))
+        layout.addLayout(actions); layout.addStretch()
+        self.preprocessing_status_label = QLabel("전처리 결과를 저장한 뒤 학습 화면에서 데이터셋을 선택하세요.")
+        layout.addWidget(self.preprocessing_status_label)
+        scroll = QScrollArea(); scroll.setWidgetResizable(True); scroll.setWidget(page)
+        self.preprocessing_tab = scroll; tabs.addTab(scroll, "데이터 전처리")
+        self._apply_preprocessing_config(self.preprocessing_config)
+        for widget in self.preprocessing_widgets:
+            if widget is self.preprocessing_mode_combo: widget.currentIndexChanged.connect(self._preprocessing_mode_changed)
+            elif isinstance(widget, QComboBox): widget.currentIndexChanged.connect(self._preprocessing_changed)
+            elif isinstance(widget, QSpinBox): widget.valueChanged.connect(self._preprocessing_changed)
+            elif isinstance(widget, QCheckBox): widget.toggled.connect(self._preprocessing_changed)
+        self.normal_csv_edit.textChanged.connect(self._stage2_inputs_changed)
+        self.anomaly_csv_edit.textChanged.connect(self._stage2_inputs_changed)
+
+    def _preprocessing_config_from_ui(self):
+        return validate_preprocessing_config({"mode": self.preprocessing_mode_combo.currentData(),
+            "expected_interval_ms": self.expected_interval_spin.value(), "gap_threshold_ms": self.gap_threshold_spin.value(),
+            "remove_exact_duplicates": self.remove_duplicates_check.isChecked(), "segment_aware": self.segment_aware_check.isChecked(),
+            "signal_transform": self.signal_transform_combo.currentData(), "scaler": self.scaler_combo.currentData(),
+            "sequence_length": self.sequence_combo.currentData(), "stride": self.stride_spin.value(),
+            "use_horizon": self.use_horizon_check.isChecked(), "prediction_horizon": self.baseline_horizon_spin.value()})
+
+    def _apply_preprocessing_config(self, config):
+        config = validate_preprocessing_config(config)
+        for widget in self.preprocessing_widgets:
+            widget.blockSignals(True)
+        self.preprocessing_mode_combo.setCurrentIndex(self.preprocessing_mode_combo.findData(config["mode"]))
+        self.expected_interval_spin.setValue(config["expected_interval_ms"])
+        self.gap_threshold_spin.setValue(config["gap_threshold_ms"])
+        self.remove_duplicates_check.setChecked(config["remove_exact_duplicates"])
+        self.segment_aware_check.setChecked(config["segment_aware"])
+        self.signal_transform_combo.setCurrentIndex(self.signal_transform_combo.findData(config["signal_transform"]))
+        self.scaler_combo.setCurrentIndex(self.scaler_combo.findData(config["scaler"]))
+        self.sequence_combo.setCurrentIndex(self.sequence_combo.findData(config["sequence_length"]))
+        self.stride_spin.setValue(config["stride"])
+        self.use_horizon_check.setChecked(config["use_horizon"])
+        self.baseline_horizon_spin.setValue(config["prediction_horizon"])
+        for widget in self.preprocessing_widgets:
+            widget.blockSignals(False)
+        self.preprocessing_config = config
+        self._update_dataset_id_suggestion()
+        self._set_preprocessing_mode_editable()
+        self._refresh_preprocessing_display()
+        self._stage2_inputs_changed()
+
+    def _set_preprocessing_mode_editable(self):
+        editable = self.preprocessing_config["mode"] == "STAGE2_SEGMENT_AWARE"
+        for widget in self.preprocessing_widgets:
+            if widget not in (self.preprocessing_mode_combo, self.save_preprocessing_button,
+                              self.load_preprocessing_button, self.normal_csv_edit, self.anomaly_csv_edit,
+                              self.normal_csv_browse, self.anomaly_csv_browse,
+                              self.analyze_data_button, self.run_preprocessing_button):
+                widget.setEnabled(editable)
+
+    def _preprocessing_mode_changed(self, *_):
+        self._apply_preprocessing_config(default_preprocessing_config(self.preprocessing_mode_combo.currentData()))
+
+    def _preprocessing_changed(self, *_):
+        try:
+            self.preprocessing_config = self._preprocessing_config_from_ui()
+        except ValueError as exc:
+            self.preprocessing_status_label.setText(str(exc))
+            self.save_preprocessing_button.setEnabled(False)
+            self._stage2_inputs_changed()
+            return
+        self.preprocessing_status_label.setText("전처리 결과를 저장한 뒤 학습 화면에서 데이터셋을 선택하세요.")
+        self.save_preprocessing_button.setEnabled(True)
+        self._update_dataset_id_suggestion()
+        self._refresh_preprocessing_display()
+        self._stage2_inputs_changed()
+
+    def _update_dataset_id_suggestion(self):
+        if not hasattr(self, "dataset_id_edit"):
+            return
+        config = self.preprocessing_config
+        signal = {"ABS_ALL": "abs", "RAW_SIGNED": "raw",
+                  "ABS_VIBRATION_RAW_CURRENT": "abs_vibration_raw_current"}[config["signal_transform"]]
+        suggested = (f"stage2_{signal}_{config['scaler'].lower()}_"
+                     f"seq{config['sequence_length']}_gap{config['gap_threshold_ms']}")
+        if not self.dataset_id_edit.text().strip() or self.dataset_id_edit.text() == self._suggested_dataset_id:
+            self.dataset_id_edit.setText(suggested)
+        self._suggested_dataset_id = suggested
+
+    def _refresh_preprocessing_display(self):
+        config = self.preprocessing_config
+        if not hasattr(self, "system_labels"): return
+        artifact = (self._selected_processed_artifact if hasattr(self, "data_mode_combo") and
+                    self.data_mode_combo.currentData() == "PROCESSED_DATASET" else None)
+        display = artifact.config["preprocessing"] if artifact is not None else config
+        values = {"Mode": "PROCESSED DATASET" if artifact is not None else config["mode"],
+                  "Dataset": artifact.dataset_id if artifact is not None else "-",
+                  "Segment Gap": f'{display["gap_threshold_ms"]} ms',
+                  "Signal Transform": display["signal_transform"], "Scaler": display["scaler"],
+                  "Sequence": str(display["sequence_length"]), "Stride": str(display["stride"]),
+                  "Horizon": str(display["prediction_horizon"]) if display["use_horizon"] else "OFF",
+                  "Input Shape": f'({display["sequence_length"]}, {len(core.FEATURES)})'}
+        for key, value in values.items(): self.system_labels[key].setText(value)
+        self.use_horizon_check.setText("사용" if config["use_horizon"] else "사용 안 함")
+        if hasattr(self, "evaluation_gap_label"):
+            evaluation_config = (self.evaluation_controller.preprocessing_config
+                if self.evaluation_controller.is_loaded and
+                   (getattr(self.evaluation_controller.model_run, "metadata", {}) or {}).get("data_mode") == "PROCESSED_DATASET"
+                else config)
+            self.evaluation_gap_label.setText(f'{evaluation_config["gap_threshold_ms"]} ms')
+        if hasattr(self, "training_model_combo") and hasattr(self, "architecture_label"):
+            self._update_model_description_only()
+
+    def _browse_stage2_csv(self, edit):
+        path, _ = QFileDialog.getOpenFileName(self, "Stage 2 CSV 선택", edit.text(), "CSV (*.csv)")
+        if path:
+            edit.setText(path)
+
+    def _stage2_snapshot(self):
+        config = self._preprocessing_config_from_ui()
+        paths = (self.normal_csv_edit.text().strip(), self.anomaly_csv_edit.text().strip())
+        if not all(paths):
+            raise ValueError("Normal CSV와 Anomaly CSV 경로를 입력하세요")
+        return {"config": config, "normal_path": str(Path(paths[0]).resolve()),
+                "anomaly_path": str(Path(paths[1]).resolve())}
+
+    @staticmethod
+    def _stage2_analysis_key(snapshot):
+        config = snapshot["config"]
+        return (snapshot["normal_path"], snapshot["anomaly_path"],
+                *(config[key] for key in ("mode", "expected_interval_ms", "gap_threshold_ms",
+                                         "remove_exact_duplicates", "segment_aware")))
+
+    def _stage2_inputs_changed(self, *_):
+        if not hasattr(self, "stage2_status_label"):
+            return
+        try: current = self._stage2_snapshot()
+        except ValueError: current = None
+        if self.stage2_analysis_snapshot is not None and (
+                current is None or self._stage2_analysis_key(current) != self._stage2_analysis_key(self.stage2_analysis_snapshot)):
+            self.stage2_analysis_snapshot = None
+            self.normal_segments_label.setText("-")
+            self.anomaly_segments_label.setText("-")
+            self.stage2_analysis_text.setPlainText("결과 만료 - 데이터 또는 구간 설정이 변경되었습니다. 다시 분석하세요.")
+            if self.stage2_preprocessing_result is None:
+                self.stage2_status_label.setText("결과 만료 - 재분석 필요")
+        if self.stage2_preprocessing_result is not None and (
+                current is None or current["config"] != self.stage2_preprocessing_config_snapshot or
+                (current["normal_path"], current["anomaly_path"]) != self.stage2_preprocessing_paths_snapshot):
+            self.stage2_preprocessing_result = None
+            self.stage2_preview_text.setPlainText("결과 만료 - 입력 또는 설정이 변경되었습니다. 전처리를 다시 실행하세요.")
+            self.stage2_status_label.setText("결과 만료 - 전처리 재실행 필요")
+            self.stage2_cross_gap_label.setText("구간 경계 횡단 윈도우: -")
+            self.stage2_cross_gap_label.setStyleSheet("font-weight:bold;color:#8ad8f5")
+            self.stage2_total_windows_label.setText("전체 윈도우 (정상 / 이상): - / -")
+            self.system_labels["Preprocessing Status"].setText("STALE")
+            self._stage2_dataset_summary = None
+            self._refresh_dataset_text()
+        self._refresh_stage2_save_enabled()
+
+    def _refresh_stage2_save_enabled(self, *_):
+        if not hasattr(self, "save_processed_dataset_button"):
+            return
+        try:
+            validate_dataset_id(self.dataset_id_edit.text().strip())
+            current = self._stage2_snapshot()
+            matching = (current["config"] == self.stage2_preprocessing_config_snapshot and
+                        (current["normal_path"], current["anomaly_path"]) == self.stage2_preprocessing_paths_snapshot)
+        except ValueError:
+            matching = False
+        training_busy = self._training_locked or (self.thread is not None and self.thread.isRunning())
+        result = self.stage2_preprocessing_result
+        self.save_processed_dataset_button.setEnabled(bool(
+            result is not None and matching and
+            result.summary["cross_gap_windows"] == 0 and not self._stage2_busy and not training_busy))
+
+    def _save_processed_dataset(self):
+        self._refresh_stage2_save_enabled()
+        if not self.save_processed_dataset_button.isEnabled():
+            return
+        dataset_id = self.dataset_id_edit.text().strip()
+        self.save_processed_dataset_button.setEnabled(False)
+        try:
+            artifact = save_processed_dataset(self.stage2_preprocessing_result, dataset_id)
+        except (ValueError, OSError, KeyError, TypeError) as exc:
+            QMessageBox.warning(self, "처리된 데이터셋 저장 오류", str(exc))
+            self._log(f"Processed dataset save error: {exc}")
+        else:
+            self.stage2_saved_dataset = artifact
+            self.stage2_saved_dataset_label.setText(
+                f"저장된 데이터셋\n데이터셋 ID: {artifact.dataset_id}\n상태: 저장 완료\n"
+                f"생성 시각: {artifact.config['created_at']}\n저장 위치: {artifact.path}")
+            self._log(f"Processed dataset saved. ID: {artifact.dataset_id} | Path: {artifact.path}")
+            self._log("학습 화면에서 처리된 데이터셋 모드와 이 데이터셋 ID를 선택하세요.")
+        finally:
+            self._refresh_stage2_save_enabled()
+
+    def _set_stage2_busy(self, busy):
+        self._stage2_busy = busy
+        training_busy = self.thread is not None and self.thread.isRunning()
+        for widget in self.preprocessing_widgets:
+            widget.setEnabled(not busy and not training_busy)
+        if not busy and not training_busy:
+            self._set_preprocessing_mode_editable()
+            try: self._stage2_snapshot()
+            except ValueError: self.save_preprocessing_button.setEnabled(False)
+        if not training_busy:
+            self.start_button.setEnabled(not busy)
+        self._refresh_stage2_save_enabled()
+
+    def _start_stage2_action(self, action):
+        if self._stage2_busy or (self.preprocessing_thread and self.preprocessing_thread.isRunning()):
+            return
+        if self.thread and self.thread.isRunning():
+            QMessageBox.information(self, "Stage 2", "학습이 끝난 뒤 전처리를 실행하세요.")
+            return
+        try: snapshot = self._stage2_snapshot()
+        except ValueError as exc:
+            self._stage2_failed(f"ValueError: {exc}", action)
+            return
+        if snapshot["config"]["mode"] != "STAGE2_SEGMENT_AWARE":
+            self._stage2_failed("ValueError: Stage 2 모드를 선택하세요.", action)
+            return
+        self._stage2_active_snapshot = snapshot
+        self._stage2_active_action = action
+        if action == "preprocess":
+            self.stage2_preprocessing_result = None
+            self._stage2_dataset_summary = None
+            self._refresh_dataset_text()
+            self.system_labels["Preprocessing Status"].setText("PREPROCESSING")
+            self.stage2_cross_gap_label.setText("구간 경계 횡단 윈도우: -")
+            self.stage2_cross_gap_label.setStyleSheet("font-weight:bold;color:#8ad8f5")
+            self.stage2_total_windows_label.setText("전체 윈도우 (정상 / 이상): - / -")
+        self._set_stage2_busy(True)
+        self.stage2_status_label.setText("데이터 분석 중..." if action == "analyze" else "전처리 중...")
+        self._log(f"Stage2 {'analysis' if action == 'analyze' else 'preprocessing'} started")
+        self._log(f"Normal path: {snapshot['normal_path']}")
+        self._log(f"Anomaly path: {snapshot['anomaly_path']}")
+        config = snapshot["config"]
+        self._log(f"Preprocessing config: Gap={config['gap_threshold_ms']}ms Signal={config['signal_transform']} "
+                  f"Scaler={config['scaler']} Seq={config['sequence_length']} Stride={config['stride']}")
+        self.preprocessing_thread = QThread(self)
+        self.preprocessing_worker = PreprocessingWorker(action, snapshot["normal_path"],
+            snapshot["anomaly_path"], config)
+        self.preprocessing_worker.moveToThread(self.preprocessing_thread)
+        self.preprocessing_thread.started.connect(self.preprocessing_worker.run)
+        self.preprocessing_worker.analysis_ready.connect(self._stage2_analysis_ready)
+        self.preprocessing_worker.preprocessing_ready.connect(self._stage2_preprocessing_ready)
+        self.preprocessing_worker.failed.connect(self._stage2_worker_failed)
+        self.preprocessing_worker.finished.connect(self.preprocessing_thread.quit)
+        self.preprocessing_thread.finished.connect(self._stage2_thread_finished)
+        self.preprocessing_thread.start()
+
+    @staticmethod
+    def _stage2_quality_text(reports):
+        labels = (("rows_before", "원본 행 수"), ("rows_after", "정리 후 행 수"),
+                  ("exact_duplicates", "완전 중복 행 수"), ("nan_count", "결측값 수"),
+                  ("inf_count", "무한값 수"), ("timestamp_backward_count", "시각 역행 수"),
+                  ("sampling_interval_ms", "측정 간격 (ms)"),
+                  ("segment_count", "구간 수"), ("segment_length_min", "최소 구간 길이"),
+                  ("segment_length_mean", "평균 구간 길이"),
+                  ("segment_length_median", "중앙 구간 길이"), ("segment_length_max", "최대 구간 길이"))
+        lines = []
+        for dataset in ("normal", "anomaly"):
+            report = reports[dataset]
+            lines.append("[정상 데이터]" if dataset == "normal" else "[이상 데이터]")
+            lines.extend(f"{title}: {report.get(key, '-')}" for key, title in labels)
+            lines.append("")
+        return "\n".join(lines)
+
+    @Slot(object)
+    def _stage2_analysis_ready(self, reports):
+        if self._stage2_active_snapshot != self._stage2_snapshot():
+            self._stage2_inputs_changed(); return
+        self.stage2_analysis_snapshot = self._stage2_active_snapshot.copy()
+        self.normal_segments_label.setText(str(reports["normal"]["segment_count"]))
+        self.anomaly_segments_label.setText(str(reports["anomaly"]["segment_count"]))
+        self.stage2_analysis_text.setPlainText(self._stage2_quality_text(reports))
+        if self.stage2_preprocessing_result is None:
+            self.stage2_status_label.setText("분석 완료")
+        for dataset in ("normal", "anomaly"):
+            report = reports[dataset]
+            self._log(f"{dataset.title()} cleaned: {report['rows_after']} | segments: {report['segment_count']}")
+
+    @Slot(object)
+    def _stage2_preprocessing_ready(self, result):
+        if self._stage2_active_snapshot != self._stage2_snapshot():
+            self._stage2_inputs_changed(); return
+        summary = result.summary
+        cross_gap = summary["cross_gap_windows"]
+        if cross_gap != 0:
+            self.stage2_preprocessing_result = None
+            self._stage2_dataset_summary = None
+            self._refresh_dataset_text()
+            self.stage2_status_label.setText("실패 - 구간 경계 횡단 윈도우 발생")
+            self.system_labels["Preprocessing Status"].setText("FAIL")
+            self.stage2_cross_gap_label.setText(f"구간 경계 횡단 윈도우: {cross_gap} — 실패")
+            self.stage2_cross_gap_label.setStyleSheet("font-weight:bold;color:#ff8c8c")
+            self.stage2_preview_text.setPlainText(f"구간 경계 횡단 윈도우: {cross_gap}\n상태: 실패")
+            self._log(f"Cross-segment windows: {cross_gap} | FAIL")
+            return
+        self.stage2_preprocessing_result = result
+        self.stage2_preprocessing_config_snapshot = result.config.copy()
+        snapshot = self._stage2_active_snapshot
+        self.stage2_preprocessing_paths_snapshot = (snapshot["normal_path"], snapshot["anomaly_path"])
+        self.stage2_analysis_snapshot = snapshot.copy()
+        self.normal_segments_label.setText(str(result.normal_quality_report["segment_count"]))
+        self.anomaly_segments_label.setText(str(result.anomaly_quality_report["segment_count"]))
+        self.stage2_analysis_text.setPlainText(self._stage2_quality_text({
+            "normal": result.normal_quality_report, "anomaly": result.anomaly_quality_report}))
+        length = result.config["sequence_length"]
+        full = summary["full_dataset_window_counts"][f"seq{length}"]
+        signal_name = {"ABS_ALL": "전체 절댓값", "RAW_SIGNED": "원본 부호 유지",
+                       "ABS_VIBRATION_RAW_CURRENT": "진동 절댓값 + 전류 원본"}[result.config["signal_transform"]]
+        scaler_name = {"MINMAX": "최소·최대 스케일링", "STANDARD": "표준화"}[result.config["scaler"]]
+        lines = ["[전처리 설정]", "모드: Stage 2 구간 인식",
+            f"예상 측정 간격: {result.config['expected_interval_ms']} ms",
+            f"기록 구간 분리 기준: {result.config['gap_threshold_ms']} ms",
+            f"신호 변환: {signal_name}", f"스케일링: {scaler_name}",
+            f"시퀀스 길이: {length}", f"이동 간격: {result.config['stride']}",
+            f"예측 간격: {'사용' if result.config['use_horizon'] else '사용 안 함'}", "",
+            "[데이터 품질]",
+            f"정상 원본 행 수: {summary['normal_raw_rows']}",
+            f"정상 정리 후 행 수: {summary['normal_cleaned_rows']}",
+            f"정상 중복 제거 행 수: {summary['normal_duplicates_removed']}",
+            f"정상 구간 수: {summary['normal_segments']}",
+            f"이상 원본 행 수: {summary['anomaly_raw_rows']}",
+            f"이상 정리 후 행 수: {summary['anomaly_cleaned_rows']}",
+            f"이상 중복 제거 행 수: {summary['anomaly_duplicates_removed']}",
+            f"이상 구간 수: {summary['anomaly_segments']}", "", "[분할]",
+            f"정상 학습 구간 수: {summary['normal_train_segments']}",
+            f"정상 검증 구간 수: {summary['normal_validation_segments']}",
+            f"정상 테스트 구간 수: {summary['normal_test_segments']}",
+            f"이상 검증 구간 수: {summary['anomaly_validation_segments']}",
+            f"이상 테스트 구간 수: {summary['anomaly_test_segments']}", "", "[관측 윈도우]",
+            f"정상 학습 윈도우 수: {summary['normal_train_windows']}",
+            f"정상 검증 윈도우 수: {summary['normal_validation_windows']}",
+            f"이상 검증 윈도우 수: {summary['anomaly_validation_windows']}",
+            f"정상 테스트 윈도우 수: {summary['normal_test_windows']}",
+            f"이상 테스트 윈도우 수: {summary['anomaly_test_windows']}",
+            f"전체 정상 윈도우 수: {full['normal']['windows']}",
+            f"전체 이상 윈도우 수: {full['anomaly']['windows']}",
+            f"윈도우 생성 가능 정상 구간 수: {full['normal']['eligible_segments']}",
+            f"윈도우 생성 가능 이상 구간 수: {full['anomaly']['eligible_segments']}",
+            f"구간 경계 횡단 윈도우: {cross_gap}", "상태: 완료",
+            "처리된 데이터셋을 저장한 뒤 학습 화면에서 해당 데이터셋 ID를 선택하세요."]
+        self.stage2_preview_text.setPlainText("\n".join(lines))
+        self.stage2_status_label.setText("전처리 완료")
+        self.stage2_cross_gap_label.setText("구간 경계 횡단 윈도우: 0 — 통과")
+        self.stage2_cross_gap_label.setStyleSheet("font-weight:bold;color:#98e6aa")
+        self.stage2_total_windows_label.setText(
+            f"전체 윈도우 (정상 / 이상): {full['normal']['windows']} / {full['anomaly']['windows']}")
+        self.system_labels["Preprocessing Status"].setText("PREPROCESSED")
+        self._stage2_dataset_summary = summary
+        self._refresh_dataset_text()
+        self._log(f"Normal cleaned: {summary['normal_cleaned_rows']} | segments: {summary['normal_segments']}")
+        self._log(f"Anomaly cleaned: {summary['anomaly_cleaned_rows']} | segments: {summary['anomaly_segments']}")
+        self._log(f"Cross-segment windows: {cross_gap}")
+        self._log("Stage 2 preprocessing completed. Save the Processed Dataset before Training.")
+        self._refresh_stage2_save_enabled()
+
+    @Slot(str)
+    def _stage2_worker_failed(self, message):
+        self._stage2_failed(message, self._stage2_active_action)
+
+    def _stage2_failed(self, message, action):
+        self._log(f"Stage2 {action} error: {message}")
+        self.stage2_status_label.setText("오류")
+        if action == "analyze":
+            self.stage2_analysis_snapshot = None
+            self.normal_segments_label.setText("-"); self.anomaly_segments_label.setText("-")
+            self.stage2_analysis_text.setPlainText(f"오류: {message}")
+        else:
+            self.stage2_preprocessing_result = None
+            self._stage2_dataset_summary = None
+            self._refresh_dataset_text()
+            self.system_labels["Preprocessing Status"].setText("ERROR")
+            self.stage2_preview_text.setPlainText(f"오류: {message}")
+            self.stage2_cross_gap_label.setText("구간 경계 횡단 윈도우: -")
+            self.stage2_cross_gap_label.setStyleSheet("font-weight:bold;color:#8ad8f5")
+            self.stage2_total_windows_label.setText("전체 윈도우 (정상 / 이상): - / -")
+        QMessageBox.warning(self, "Stage 2 전처리 오류", message)
+        self._refresh_stage2_save_enabled()
+
+    @Slot()
+    def _stage2_thread_finished(self):
+        if self.preprocessing_worker:
+            self.preprocessing_worker.deleteLater()
+        if self.preprocessing_thread:
+            self.preprocessing_thread.deleteLater()
+        self.preprocessing_worker = None
+        self.preprocessing_thread = None
+        self._set_stage2_busy(False)
+
+    def save_preprocessing_settings(self):
+        try: config = self._preprocessing_config_from_ui()
+        except ValueError as exc:
+            QMessageBox.warning(self, "전처리 설정 오류", str(exc)); return
+        path, _ = QFileDialog.getSaveFileName(self, "전처리 설정 저장", str(DEFAULT_CONFIG_DIR / "stage2.json"), "JSON (*.json)")
+        if path:
+            try: save_preprocessing_config(path, config)
+            except (ValueError, OSError) as exc: QMessageBox.warning(self, "전처리 설정 오류", str(exc))
+
+    def load_preprocessing_settings(self):
+        path, _ = QFileDialog.getOpenFileName(self, "전처리 설정 불러오기", str(DEFAULT_CONFIG_DIR), "JSON (*.json)")
+        if path:
+            try: self._apply_preprocessing_config(load_preprocessing_config(path))
+            except (ValueError, OSError, json.JSONDecodeError) as exc: QMessageBox.warning(self, "전처리 설정 오류", str(exc))
 
     def _add_guided_row(self, form, label, widget, guide_name):
         title = QWidget(); row = QHBoxLayout(title)
@@ -398,12 +933,23 @@ class MainWindow(QMainWindow):
         QMessageBox.information(self, f"{PARAMETER_HELP[name][0]} 설명", self.parameter_guide.text())
 
     def _set_training_locked(self, locked):
+        self._training_locked = locked
         for widget in self._training_editable_widgets:
             widget.setEnabled(not locked)
+        processed = self.data_mode_combo.currentData() == "PROCESSED_DATASET"
+        self.processed_dataset_combo.setEnabled(processed and not locked)
+        self.refresh_processed_datasets_button.setEnabled(processed and not locked)
+        self.preset_combo.setEnabled(not processed and not locked)
+        for widget in self.preprocessing_widgets:
+            widget.setEnabled(not locked and not self._stage2_busy)
         self.run_mode.setEnabled(not locked)
-        self.start_button.setEnabled(not locked)
+        self.start_button.setEnabled(not locked and not self._stage2_busy)
         self.stop_button.setEnabled(locked)
-        if not locked:
+        self._refresh_stage2_save_enabled()
+        if not locked and not self._stage2_busy:
+            self._set_preprocessing_mode_editable()
+            try: self._preprocessing_config_from_ui()
+            except ValueError: self.save_preprocessing_button.setEnabled(False)
             self._update_callback_controls()
             self._update_model_dependent_controls()
             self._update_optimizer_loss_controls()
@@ -417,7 +963,6 @@ class MainWindow(QMainWindow):
         self.huber_delta_spin.setEnabled(huber)
 
     def reset_loss_graph(self):
-        self.loss_canvas.clear_data()
         self.graph_tab.reset_current()
         self._log("Training loss graph reset")
 
@@ -442,21 +987,102 @@ class MainWindow(QMainWindow):
 
     def update_training_model(self):
         spec = MODEL_REGISTRY[self.training_model_combo.currentData()]
-        self.training_model_description.setText(f"{spec.display_name}\n과제: {'예측' if spec.task_type == 'FORECAST' else '정상 패턴 복원'}\n입력: 20 × 3{' + Gaussian 노이즈' if spec.denoising else ''}\n출력: {spec.forecast_length or 20} × 3\n\n{spec.description}")
+        self._update_model_description_only()
         cnn = spec.id in {"CNN_LSTM_AUTOENCODER", "DENOISING_CNN_LSTM_AUTOENCODER"}
         kernel_size = self.cnn_kernel_combo.currentData() if cnn else None
         filters = self.cnn_filters_combo.currentData()
         bottleneck = self.bottleneck_combo.currentData()
-        architecture = (f"입력 20×3{' + Gaussian 노이즈' if spec.denoising else ''}\n↓\n"
-                        f"Conv1D {filters}, k={kernel_size} × 2\n↓\n"
-                        f"LSTM64 → B{bottleneck}\n↓\nRepeatVector20\n↓\n"
-                        f"LSTM{bottleneck} → LSTM64\n↓\n출력 20×3") if cnn else spec.architecture
-        self.architecture_label.setText(architecture)
-        model = spec.builder(kernel_size=kernel_size, cnn_filters=filters, bottleneck_units=bottleneck) if cnn else spec.builder()
+        if self.data_mode_combo.currentData() == "PROCESSED_DATASET" and self._selected_processed_artifact is not None:
+            config = self._selected_processed_artifact.config["preprocessing"]
+            model = training_engine.build_training_model(spec, self._training_config_dict(), config)
+        else:
+            model = spec.builder(kernel_size=kernel_size, cnn_filters=filters, bottleneck_units=bottleneck) if cnn else spec.builder()
         self.params_label.setText(f"전체 파라미터 수: {model.count_params()}")
         if self.thread is None or not self.thread.isRunning():
             self.status_label.setText(f"선택한 모델: {spec.display_name}    상태: 준비")
         self._update_experiment_summary()
+
+    def _update_model_description_only(self):
+        spec = MODEL_REGISTRY[self.training_model_combo.currentData()]
+        sequence = (self._selected_processed_artifact.config["preprocessing"]["sequence_length"]
+                    if self.data_mode_combo.currentData() == "PROCESSED_DATASET" and self._selected_processed_artifact is not None
+                    else self.preprocessing_config["sequence_length"])
+        description = spec.description.replace("20×3", f"{sequence}×3").replace("과거 20 timestep", f"과거 {sequence} timestep")
+        self.training_model_description.setText(f"{spec.display_name}\n과제: {'예측' if spec.task_type == 'FORECAST' else '정상 패턴 복원'}\n입력: {sequence} × 3{' + Gaussian 노이즈' if spec.denoising else ''}\n출력: {spec.forecast_length or sequence} × 3\n\n{description}")
+        cnn = spec.id in {"CNN_LSTM_AUTOENCODER", "DENOISING_CNN_LSTM_AUTOENCODER"}
+        kernel_size = self.cnn_kernel_combo.currentData() if cnn else None
+        filters = self.cnn_filters_combo.currentData()
+        bottleneck = self.bottleneck_combo.currentData()
+        architecture = (f"입력 {sequence}×3{' + Gaussian 노이즈' if spec.denoising else ''}\n↓\n"
+                        f"Conv1D {filters}, k={kernel_size} × 2\n↓\n"
+                        f"LSTM64 → B{bottleneck}\n↓\nRepeatVector{sequence}\n↓\n"
+                        f"LSTM{bottleneck} → LSTM64\n↓\n출력 {sequence}×3") if cnn else spec.architecture.replace("20×3", f"{sequence}×3").replace("RepeatVector20", f"RepeatVector{sequence}")
+        self.architecture_label.setText(architecture)
+
+    def _data_mode_changed(self, *_):
+        processed = self.data_mode_combo.currentData() == "PROCESSED_DATASET"
+        locked = self._training_locked
+        self.processed_dataset_combo.setEnabled(processed and not locked)
+        self.refresh_processed_datasets_button.setEnabled(processed and not locked)
+        self.preset_combo.setEnabled(not processed and not locked)
+        current_model = self.training_model_combo.currentData()
+        self.training_model_combo.blockSignals(True)
+        self.training_model_combo.clear()
+        if processed:
+            spec = MODEL_REGISTRY["KAMP_LSTM_AE"]
+            self.training_model_combo.addItem(spec.display_name, spec.id)
+        else:
+            for spec in MODEL_REGISTRY.values():
+                if spec.status == "ACTIVE": self.training_model_combo.addItem(spec.display_name, spec.id)
+        wanted = "KAMP_LSTM_AE" if processed else current_model
+        index = self.training_model_combo.findData(wanted)
+        self.training_model_combo.setCurrentIndex(index if index >= 0 else self.training_model_combo.findData("CNN_LSTM_AUTOENCODER"))
+        self.training_model_combo.blockSignals(False)
+        if processed:
+            self.refresh_processed_datasets()
+        else:
+            self._selected_processed_artifact = None
+            self.processed_dataset_summary_label.setText("KAMP baseline data path")
+            self._refresh_preprocessing_display()
+        self.update_training_model()
+        self._update_model_dependent_controls()
+
+    def refresh_processed_datasets(self):
+        previous = self.processed_dataset_combo.currentData()
+        self.processed_dataset_combo.blockSignals(True)
+        self.processed_dataset_combo.clear()
+        for dataset in discover_processed_datasets():
+            self.processed_dataset_combo.addItem(dataset["dataset_id"], dataset["path"])
+        index = self.processed_dataset_combo.findData(previous)
+        if index >= 0:
+            self.processed_dataset_combo.setCurrentIndex(index)
+        self.processed_dataset_combo.blockSignals(False)
+        self._processed_dataset_changed()
+
+    def _processed_dataset_changed(self, *_):
+        self._selected_processed_artifact = None
+        path = self.processed_dataset_combo.currentData()
+        if path and self.data_mode_combo.currentData() == "PROCESSED_DATASET":
+            try:
+                artifact = load_processed_dataset(path)
+            except (ValueError, OSError, KeyError, TypeError) as exc:
+                self.processed_dataset_summary_label.setText(f"Invalid Processed Dataset: {exc}")
+            else:
+                self._selected_processed_artifact = artifact
+                config, summary = artifact.config["preprocessing"], artifact.summary
+                self.processed_dataset_summary_label.setText(
+                    f"Dataset ID: {artifact.dataset_id}\nMode: {config['mode']}\n"
+                    f"Signal: {config['signal_transform']} | Scaler: {config['scaler']}\n"
+                    f"Sequence: {config['sequence_length']} | Stride: {config['stride']} | "
+                    f"Gap Threshold: {config['gap_threshold_ms']} ms | Horizon: OFF\n"
+                    f"Train: {summary['train_windows']} | Validation: "
+                    f"{summary['validation_normal_windows'] + summary['validation_anomaly_windows']} | "
+                    f"Test: {summary['test_normal_windows'] + summary['test_anomaly_windows']} windows")
+        elif self.data_mode_combo.currentData() == "PROCESSED_DATASET":
+            self.processed_dataset_summary_label.setText("Valid Processed Dataset이 없습니다. Refresh를 확인하세요.")
+        self._refresh_preprocessing_display()
+        if self.training_model_combo.currentData() and self._selected_processed_artifact is not None:
+            self.update_training_model()
 
     def _update_model_dependent_controls(self, *_):
         denoising = self.training_model_combo.currentData() == "DENOISING_CNN_LSTM_AUTOENCODER"
@@ -546,6 +1172,7 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "설정 오류", f"설정 파일을 불러오지 못했습니다: {exc}")
 
     def apply_preset(self, preset):
+        if self.data_mode_combo.currentData() == "PROCESSED_DATASET": return
         if preset == "CUSTOM": return
         if not hasattr(self, "epochs_spin"): return
         self._applying_preset = True
@@ -682,7 +1309,18 @@ class MainWindow(QMainWindow):
 
     def _evaluation_loaded(self, summary):
         self._log(f"Evaluation model ready: {summary}")
+        self._show_segment_metrics({})
         self.update_algorithm_description()
+        if summary.get("data_mode") == "PROCESSED_DATASET":
+            self.evaluation_dataset_label.setText(
+                f"DATA MODE: PROCESSED DATASET\nDataset: {summary['dataset_id']}\n"
+                f"Sequence: {summary['sequence_length']} | Signal: {summary['signal_transform']} | "
+                f"Scaler: {summary['scaler']} | Gap: {summary['gap_threshold_ms']} ms\n"
+                f"Validation: {summary['valid_samples']} | Test: {summary['test_samples']}")
+            self.evaluation_gap_label.setText(f"{summary['gap_threshold_ms']} ms")
+        else:
+            self.evaluation_dataset_label.setText("DATA MODE: KAMP BASELINE")
+            self.evaluation_gap_label.setText(f"{self.preprocessing_config['gap_threshold_ms']} ms")
         run = getattr(self.evaluation_controller, "model_run", None)
         if run is not None and run.model_id in {"CNN_LSTM_AUTOENCODER", "DENOISING_CNN_LSTM_AUTOENCODER"}:
             self.loaded_architecture_label.setText(architecture_signature(run.metadata))
@@ -697,11 +1335,15 @@ class MainWindow(QMainWindow):
             "TN": str(result['tn']), "FP (False Alarm)": str(result['fp']), "FN (Missed Anomaly)": str(result['fn']),
             "TP": str(result['tp']), "Fallback": result['fallback_reason'] if result['fallback_used'] else "No"}
         for key, value in values.items(): self.eval_result_labels[key].setText(value)
+        self._show_segment_metrics(result)
         self.eval_status_label.setText(f"모델: {result['model']}    Pipeline: {SCORE_METHODS[result['score_method']].display_name} → {self._result_temporal_display(result)} → {THRESHOLD_METHODS[result['threshold_method']].display_name}    상태: 완료")
         self._append_comparison(result)
         run = self.evaluation_run_combo.currentData()
         if run is not None:
             path = append_evaluation_result(run, result); self._log(f"Evaluation result saved: {path}")
+            if result.get("data_mode") == "PROCESSED_DATASET":
+                detail_path = save_segment_detail_csv(run, self.evaluation_controller._last_segment_details)
+                self._log(f"Segment details saved: {detail_path}")
         if result["fallback_used"]: self._log(f"Threshold fallback: {result['fallback_reason']}")
         self.evaluation_pages.setCurrentIndex(1)
 
@@ -731,29 +1373,49 @@ class MainWindow(QMainWindow):
             "FP (False Alarm)": str(result['fp']), "FN (Missed Anomaly)": str(result['fn']), "TP": str(result['tp']),
             "Fallback": result['fallback_reason'] if result['fallback_used'] else "No"}
         for key, value in values.items(): self.eval_result_labels[key].setText(value)
+        self._show_segment_metrics(result)
+
+    def _show_segment_metrics(self, result):
+        for key in METRIC_KEYS:
+            value = result.get(key)
+            self.segment_result_labels[key].setText("-" if value is None or value == "" else str(value))
 
     def _append_comparison(self, result):
         fingerprint = (str(result.get("model_id", result.get("model", ""))), str(result.get("experiment_name", "")),
                        str(result.get("score_method", result.get("score_name", ""))), str(result.get("threshold_method", result.get("threshold_name", ""))),
                        str(result.get("threshold", "")), str(result.get("created_at", "")),
                        str(result.get("temporal_method", "NONE")), str(result.get("ewma_alpha", "")),
-                       str(result.get("timestamp_aware", True)))
+                       str(result.get("timestamp_aware", True)),
+                       str(result.get("dataset_id", "")), str(result.get("sequence_length", "")),
+                       str(result.get("signal_transform", "")), str(result.get("scaler", "")))
         if any(item.get("_fingerprint") == fingerprint for item in self.comparison_history): return
         result = result.copy(); result["_fingerprint"] = fingerprint
         self.comparison_history.append(result.copy())
         row = self.comparison_table.rowCount(); self.comparison_table.insertRow(row)
         def number(key, digits=6):
-            try: return f"{float(result.get(key, '')):.{digits}f}"
+            value = result.get(key, "")
+            if value is None: return ""
+            try: return f"{float(value):.{digits}f}"
             except (TypeError, ValueError): return str(result.get(key, ""))
         score_display = SCORE_METHODS[result["score_method"]].display_name if result.get("score_method") in SCORE_METHODS else result.get("score_name", result.get("score_method", ""))
         threshold_display = THRESHOLD_METHODS[result["threshold_method"]].display_name if result.get("threshold_method") in THRESHOLD_METHODS else result.get("threshold_name", result.get("threshold_method", ""))
-        values = (result.get("status", ""), result.get("model", "LSTM AutoEncoder"), result.get("experiment_name", ""), architecture_signature(result), result.get("seed", ""), result.get("optimizer", ""),
+        experiment_display = result.get("experiment_name", "")
+        if result.get("dataset_id"):
+            experiment_display = f"{experiment_display} [{result['dataset_id']}]"
+        values = (result.get("status", ""), result.get("model", "LSTM AutoEncoder"), experiment_display, architecture_signature(result), result.get("seed", ""), result.get("optimizer", ""),
                   result.get("learning_rate", ""), result.get("loss", ""), result.get("batch_size", ""), result.get("noise_std", ""), score_display,
                   threshold_display, number("threshold", 8), number("accuracy"), number("balanced_accuracy"), number("precision"), number("recall"), number("f1"),
                   result.get("tn", ""), result.get("fp", ""), result.get("fn", ""), result.get("tp", ""), result.get("best_epoch", ""), result.get("best_val_loss", ""), result.get("training_time", ""), result.get("created_at", ""),
                   result.get("temporal_method", "NONE"), result.get("ewma_alpha", ""), result.get("timestamp_aware", True), result.get("total_error", ""),
-                  result.get("detection_delay_samples", ""), result.get("pareto", ""))
+                  result.get("detection_delay_samples", ""), result.get("pareto", ""),
+                  result.get("sequence_length", ""), number("segment_detection_rate"),
+                  number("median_segment_delay_seconds"))
         for column, value in enumerate(values): self.comparison_table.setItem(row, column, QTableWidgetItem(str(value)))
+        if result.get("dataset_id"):
+            self.comparison_table.item(row, 2).setToolTip(
+                f"Data Mode: {result.get('data_mode')}\nDataset: {result['dataset_id']}\n"
+                f"Sequence: {result.get('sequence_length')} | Signal: {result.get('signal_transform')} | "
+                f"Scaler: {result.get('scaler')} | Gap: {result.get('gap_threshold_ms')} ms")
         self.comparison_table.item(row, 0).setData(Qt.UserRole, len(self.comparison_history) - 1)
         self._refresh_filter_values(); self.apply_history_filters()
         if hasattr(self, "comparison_summary_label"): self._update_comparison_summary()
@@ -830,8 +1492,11 @@ class MainWindow(QMainWindow):
                       "threshold": row.get("threshold", ""), "accuracy": row.get("accuracy", ""), "precision": row.get("precision", ""),
                       "temporal_method": row.get("temporal_method", "NONE"), "ewma_alpha": row.get("ewma_alpha", ""),
                       "timestamp_aware": row.get("timestamp_aware", True), "timestamp_gap_threshold": row.get("timestamp_gap_threshold", ""),
+                      **{key: row.get(key, "") for key in ("preprocessing_mode", "data_mode", "dataset_id", "sequence_length",
+                          "stride", "gap_threshold_ms", "signal_transform", "scaler", "use_horizon", "prediction_horizon")},
                       "total_error": row.get("total_error", ""), "detection_delay_samples": row.get("detection_delay_samples", ""),
                       "detection_delay_seconds": row.get("detection_delay_seconds", ""), "pareto": row.get("pareto", ""),
+                      **{key: row.get(key, "") for key in METRIC_KEYS},
                       "balanced_accuracy":row.get("balanced_accuracy", ""), "recall": row.get("recall", ""), "f1": row.get("f1", row.get("F1", "")), "tn":safe_int(row.get("tn", row.get("TN", 0))), "fp":safe_int(row.get("fp", row.get("FP", 0))), "fn":safe_int(row.get("fn", row.get("FN", 0))), "tp":safe_int(row.get("tp", row.get("TP", 0))), "best_epoch":row.get("best_epoch", ""), "best_val_loss":row.get("best_val_loss", ""), "training_time":row.get("training_time", ""), "created_at":row.get("created_at", "")}
             self._append_comparison(result)
         self._log(f"Historical result imported: {path}")
@@ -846,14 +1511,19 @@ class MainWindow(QMainWindow):
                 "score_method", "threshold_method", "threshold", "accuracy", "balanced_accuracy", "precision", "recall", "f1", "specificity", "fpr", "fnr",
                 "tn", "fp", "fn", "tp", "best_epoch", "best_val_loss", "training_time", "created_at",
                 "effective_threshold_method", "fallback_used", "fallback_reason", "temporal_method", "ewma_alpha", "timestamp_aware",
-                "timestamp_gap_threshold", "total_error", "detection_delay_samples", "detection_delay_seconds", "pareto"]
+                "timestamp_gap_threshold", "total_error", "detection_delay_samples", "detection_delay_seconds", "pareto",
+                "preprocessing_mode", "data_mode", "dataset_id", "sequence_length", "stride", "gap_threshold_ms",
+                "signal_transform", "scaler", "use_horizon", "prediction_horizon", *METRIC_KEYS]
         with path.open("x", newline="", encoding="utf-8-sig") as handle:
             writer = csv.DictWriter(handle, fieldnames=keys); writer.writeheader()
             for result in self.comparison_history: writer.writerow({key: result.get(key, "") for key in keys})
         self._log(f"Comparison exported: {path}")
 
     def _evaluation_failed(self, message):
-        self._log(message); self._update_evaluation_status("ERROR"); QMessageBox.critical(self, "Evaluation Error", message)
+        self._log(message); self._update_evaluation_status("ERROR")
+        if not self.evaluation_controller.is_loaded:
+            self.evaluation_dataset_label.setText(f"DATA MODE: ERROR\n{message}")
+        QMessageBox.critical(self, "Evaluation Error", message)
 
     def _evaluation_thread_finished(self):
         if self.evaluation_worker: self.evaluation_worker.deleteLater()
@@ -865,12 +1535,34 @@ class MainWindow(QMainWindow):
         try: config = validate_training_config(self._training_config_dict())
         except ValueError as exc:
             QMessageBox.warning(self, "Invalid Training Configuration", str(exc)); return
+        data_mode = self.data_mode_combo.currentData()
+        processed_path = None
+        if data_mode == "PROCESSED_DATASET":
+            if self.training_model_combo.currentData() != "KAMP_LSTM_AE":
+                QMessageBox.warning(self, "Invalid Model", "Processed Dataset은 현재 KAMP_LSTM_AE만 지원합니다."); return
+            processed_path = self.processed_dataset_combo.currentData()
+            try:
+                if not processed_path: raise ValueError("Processed Dataset을 선택하세요.")
+                artifact = load_processed_dataset(processed_path)
+                preprocessing = artifact.config["preprocessing"]
+            except (ValueError, OSError, KeyError, TypeError) as exc:
+                QMessageBox.warning(self, "Invalid Processed Dataset", str(exc)); return
+        else:
+            try: preprocessing = self._preprocessing_config_from_ui()
+            except ValueError as exc:
+                QMessageBox.warning(self, "Invalid Preprocessing Configuration", str(exc)); return
         self.reset_loss_graph()
         self.graph_tab.reset_current({**config, "display_name": self.training_model_combo.currentText()})
         self._set_training_locked(True)
         self.status_label.setText(f"학습 모델: {self.training_model_combo.currentText()}    실행: {'빠른 시험' if quick else '전체 학습'}    상태: 시작 중")
         model_id = self.training_model_combo.currentData()
-        self.thread = QThread(self); self.worker = training_engine.TrainingWorker(quick, model_id, config); self.worker.moveToThread(self.thread)
+        self.thread = QThread(self)
+        if data_mode == "PROCESSED_DATASET":
+            self.worker = training_engine.TrainingWorker(quick, model_id, config, preprocessing,
+                data_mode="PROCESSED_DATASET", processed_dataset_path=processed_path)
+        else:
+            self.worker = training_engine.TrainingWorker(quick, model_id, config, preprocessing)
+        self.worker.moveToThread(self.thread)
         self.thread.finished.connect(self._thread_finished)
         self.thread.started.connect(self.worker.run); self.worker.status_changed.connect(self.update_status); self.worker.log_message.connect(self._log)
         self.worker.dataset_ready.connect(self.update_dataset); self.worker.model_ready.connect(self.update_model); self.worker.epoch_update.connect(self.update_epoch)
@@ -881,17 +1573,54 @@ class MainWindow(QMainWindow):
         if self.worker: self.worker.request_stop(); self._log("Stop requested")
 
     def update_status(self, status): self.status_label.setText(self.status_label.text().split("상태:")[0] + "상태: " + status)
-    def update_dataset(self, data): self.dataset_text.setText("\n".join(f"{k}: {v}" for k, v in data.items())); self._log(f"Dataset ready: {data}")
+    def _refresh_dataset_text(self):
+        sections = []
+        if self._stage2_training_dataset is not None:
+            heading = "Processed Dataset Training" if self._stage2_training_dataset.get("data_mode") == "PROCESSED_DATASET" else "KAMP Training"
+            sections.append(f"[{heading}]\n" + "\n".join(f"{k}: {v}" for k, v in self._stage2_training_dataset.items()))
+        if self._stage2_dataset_summary is not None:
+            summary = self._stage2_dataset_summary
+            full = summary["full_dataset_window_counts"][f"seq{summary['sequence_length']}"]
+            sections.append("[Stage 2 Preprocessing]\n"
+                f"Normal Cleaned: {summary['normal_cleaned_rows']} | Segments: {summary['normal_segments']}\n"
+                f"Anomaly Cleaned: {summary['anomaly_cleaned_rows']} | Segments: {summary['anomaly_segments']}\n"
+                f"Sequence: {summary['sequence_length']} | Windows Normal/Anomaly: "
+                f"{full['normal']['windows']}/{full['anomaly']['windows']}\n"
+                f"Cross-gap: {summary['cross_gap_windows']}\nSave and select this Processed Dataset for Training.")
+        self.dataset_text.setText("\n\n".join(sections) if sections else "실행 기록 없음")
+
+    def update_dataset(self, data):
+        self._stage2_training_dataset = data.copy()
+        if data.get("data_mode") == "PROCESSED_DATASET":
+            for key, value in (("Mode", "PROCESSED DATASET"), ("Dataset", data["dataset_id"]),
+                               ("Sequence", str(data["sequence_length"])), ("Horizon", "OFF"),
+                               ("Input Shape", data["input_shape"]), ("Signal Transform", data["signal_transform"]),
+                               ("Scaler", data["scaler"]), ("Segment Gap", f"{data['gap_threshold_ms']} ms")):
+                self.system_labels[key].setText(value)
+        self._refresh_dataset_text()
+        self._log(f"Dataset ready: {data}")
     def update_model(self, params, trainable): self.params_label.setText(f"전체 파라미터 수: {params}\n학습 파라미터 수: {trainable}")
     @Slot(int, int, float, float, float, float, int, int, float, int)
     def update_epoch(self, epoch, maximum, loss, val_loss, lr, elapsed, since, best_epoch, best_loss, reduce_count):
         previous_lr = getattr(self, "_last_lr", lr); self._last_lr = lr
-        self.progress.setMaximum(maximum); self.progress.setValue(epoch); self.loss_canvas.update_data(epoch, loss, val_loss); self.loss_canvas.update_markers(best_epoch, lr < previous_lr)
+        self.progress.setMaximum(maximum); self.progress.setValue(epoch)
         values = (("Model", self.training_model_combo.currentData()), ("Experiment Name", self.experiment_name_edit.text().strip() or "AUTO"), ("Epoch", f"{epoch} / {maximum}"), ("Train Loss", f"{loss:.6g}"), ("Validation Loss", f"{val_loss:.6g}"), ("Best Epoch", str(best_epoch)), ("Best Val Loss", f"{best_loss:.6g}"), ("Generalization Gap", f"{val_loss-loss:+.6g}"), ("Learning Rate", f"{lr:.6g}"), ("Elapsed", f"{elapsed:.1f}s"), ("EarlyStopping", f"{since} / {self.early_stopping_patience_spin.value()}"), ("ReduceLR", str(reduce_count)), ("Optimizer", self.optimizer_combo.currentText()), ("Loss", self.loss_combo.currentText()), ("Batch Size", str(self.batch_spin.value())), ("Noise Std", str(self.noise_std_spin.value()) if self.training_model_combo.currentData() == "DENOISING_CNN_LSTM_AUTOENCODER" else "N/A"))
         for key, value in values: self.monitor_labels[key].setText(value)
         self.graph_tab.add_current_epoch(epoch, loss, val_loss, lr, best_epoch, best_loss)
     def update_evaluation(self, data):
         self._log(f"Training baseline evaluation: threshold={data.get('threshold')} accuracy={data.get('accuracy')} f1={data.get('f1_score')}")
+        if data.get("data_mode") == "PROCESSED_DATASET":
+            matrix = data["confusion_matrix"]
+            self._append_comparison({"status": "QUICK_TEST" if self.run_mode.currentData() == "QUICK_TEST" else "TRAINED",
+                "model": MODEL_REGISTRY[data["model_id"]].display_name, "model_id": data["model_id"],
+                "experiment_name": data["experiment_name"], "data_mode": data["data_mode"],
+                "dataset_id": data["dataset_id"], "sequence_length": data["sequence_length"],
+                "signal_transform": data["signal_transform"], "scaler": data["scaler"],
+                "gap_threshold_ms": data["gap_threshold_ms"], "score_method": "LAST_STEP_MSE",
+                "threshold_method": "PR_INTERSECTION", "threshold": data["threshold"],
+                "accuracy": data["accuracy"], "precision": data["precision"],
+                "recall": data["recall"], "f1": data["f1_score"],
+                "tn": matrix[0][0], "fp": matrix[0][1], "fn": matrix[1][0], "tp": matrix[1][1]})
     def training_finished(self, status):
         self.graph_tab.finish_current(status, core.QUICK_TEST_EPOCHS if self.run_mode.currentData() == "QUICK_TEST" else self.epochs_spin.value())
         self.graph_tab.refresh_runs()
@@ -923,6 +1652,9 @@ class MainWindow(QMainWindow):
         if self.evaluation_thread and self.evaluation_thread.isRunning():
             self._log("Window close requested: waiting for evaluation worker")
             self.evaluation_thread.quit(); self.evaluation_thread.wait()
+        if self.preprocessing_thread and self.preprocessing_thread.isRunning():
+            self._log("Window close requested: waiting for preprocessing worker")
+            self.preprocessing_thread.quit(); self.preprocessing_thread.wait()
         event.accept()
 
 

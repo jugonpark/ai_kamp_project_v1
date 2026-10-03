@@ -12,28 +12,31 @@ def _compile(model):
     return model
 
 
-def build_gru_autoencoder():
-    inputs = layers.Input((SEQUENCE_LENGTH, FEATURE_COUNT))
+def build_gru_autoencoder(sequence_length=SEQUENCE_LENGTH, feature_count=FEATURE_COUNT):
+    inputs = layers.Input((sequence_length, feature_count))
     x = layers.GRU(64, return_sequences=True)(inputs); x = layers.GRU(32)(x)
-    x = layers.RepeatVector(SEQUENCE_LENGTH)(x); x = layers.GRU(32, return_sequences=True)(x)
+    x = layers.RepeatVector(sequence_length)(x); x = layers.GRU(32, return_sequences=True)(x)
     x = layers.GRU(64, return_sequences=True)(x)
-    return _compile(Model(inputs, layers.TimeDistributed(layers.Dense(FEATURE_COUNT))(x), name="gru_autoencoder"))
+    return _compile(Model(inputs, layers.TimeDistributed(layers.Dense(feature_count))(x), name="gru_autoencoder"))
 
 
-def build_cnn_lstm_autoencoder(kernel_size=3, cnn_filters=32, bottleneck_units=32):
-    inputs = layers.Input((SEQUENCE_LENGTH, FEATURE_COUNT))
+def build_cnn_lstm_autoencoder(kernel_size=3, cnn_filters=32, bottleneck_units=32,
+                               sequence_length=SEQUENCE_LENGTH, feature_count=FEATURE_COUNT):
+    inputs = layers.Input((sequence_length, feature_count))
     x = layers.Conv1D(cnn_filters, kernel_size, padding="same", activation="relu")(inputs)
     x = layers.Conv1D(cnn_filters, kernel_size, padding="same", activation="relu")(x)
     x = layers.LSTM(64, return_sequences=True)(x); x = layers.LSTM(bottleneck_units)(x)
-    x = layers.RepeatVector(SEQUENCE_LENGTH)(x); x = layers.LSTM(bottleneck_units, return_sequences=True)(x)
+    x = layers.RepeatVector(sequence_length)(x); x = layers.LSTM(bottleneck_units, return_sequences=True)(x)
     x = layers.LSTM(64, return_sequences=True)(x)
-    return _compile(Model(inputs, layers.TimeDistributed(layers.Dense(FEATURE_COUNT))(x), name="cnn_lstm_autoencoder"))
+    return _compile(Model(inputs, layers.TimeDistributed(layers.Dense(feature_count))(x), name="cnn_lstm_autoencoder"))
 
 
-def build_denoising_cnn_lstm_autoencoder(kernel_size=3, cnn_filters=32, bottleneck_units=32):
+def build_denoising_cnn_lstm_autoencoder(kernel_size=3, cnn_filters=32, bottleneck_units=32,
+                                         sequence_length=SEQUENCE_LENGTH, feature_count=FEATURE_COUNT):
     """Same architecture as CNN-LSTM; denoising is a training-input policy."""
     return build_cnn_lstm_autoencoder(kernel_size=kernel_size, cnn_filters=cnn_filters,
-                                      bottleneck_units=bottleneck_units)
+                                      bottleneck_units=bottleneck_units,
+                                      sequence_length=sequence_length, feature_count=feature_count)
 
 
 def build_lstm_forecast_5():
